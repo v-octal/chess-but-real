@@ -1,5 +1,6 @@
 import { Chess } from 'chess.js'
 import type { Color, Move, PieceSymbol } from 'chess.js'
+import { getCaptureOdds } from './capture'
 
 export type ComputerMove = {
   from: string
@@ -94,16 +95,49 @@ function evaluate(game: Chess): number {
   return game.turn() === 'w' ? score : -score
 }
 
-function priority(move: Move): number {
-  return (move.san.endsWith('#') ? mateScore : 0)
-    + (move.captured ? pieceValues[move.captured] * 10 - pieceValues[move.piece] : 0)
-    + (move.promotion ? pieceValues[move.promotion] : 0)
-    + (move.san.endsWith('+') ? 40 : 0)
+function priority(move: Move, chance: number | null): number {
+  const probability = (chance ?? 100) / 100
+  return (move.san.endsWith('#') ? mateScore * probability : 0)
+    + (move.captured ? (pieceValues[move.captured] * 10 - pieceValues[move.piece]) * probability + (chance ?? 100) : 0)
+    + (move.promotion ? pieceValues[move.promotion] * probability : 0)
+    + (move.san.endsWith('+') ? 40 * probability : 0)
     + (move.isKingsideCastle() || move.isQueensideCastle() ? 30 : 0)
+}
+
+function orderedMoves(game: Chess) {
+  return game.moves({ verbose: true })
+    .map((move) => ({ move, chance: getCaptureOdds(game, move)?.chance ?? null }))
+    .sort((a, b) => priority(b.move, b.chance) - priority(a.move, a.chance))
 }
 
 function checkTime(deadline: number): void {
   if (performance.now() >= deadline) throw searchTimeout
+}
+
+function failedCapturePosition(game: Chess): Chess {
+  const [board, turn, castling, , halfmove, fullmove] = game.fen().split(' ')
+  return new Chess(`${board} ${turn === 'w' ? 'b' : 'w'} ${castling} - ${Number(halfmove) + 1} ${Number(fullmove) + (turn === 'b' ? 1 : 0)}`)
+}
+
+function scoreMove(game: Chess, move: Move, chance: number | null, depth: number, alpha: number, beta: number, ply: number, deadline: number): number {
+  const inCheck = chance !== null && game.isCheck()
+  game.move(move)
+  let successScore: number
+  try {
+    successScore = -search(game, depth - 1, chance === null ? -beta : -Infinity, chance === null ? -alpha : Infinity, ply + 1, deadline)
+  } finally {
+    game.undo()
+  }
+  if (chance === null) return successScore
+
+  let failureScore = -mateScore + ply + 1
+  if (!inCheck) {
+    checkTime(deadline)
+    failureScore = -search(failedCapturePosition(game), depth - 1, -Infinity, Infinity, ply + 1, deadline)
+  }
+
+  const probability = chance / 100
+  return probability * successScore + (1 - probability) * failureScore
 }
 
 function search(game: Chess, depth: number, alpha: number, beta: number, ply: number, deadline: number): number {
@@ -115,21 +149,14 @@ function search(game: Chess, depth: number, alpha: number, beta: number, ply: nu
     return evaluate(game)
   }
 
-  const moves = game.moves({ verbose: true })
+  const moves = orderedMoves(game)
   if (moves.length === 0) return game.isCheck() ? -mateScore + ply : 0
   if (game.isDrawByFiftyMoves() || game.isInsufficientMaterial() || game.isThreefoldRepetition()) return 0
-  moves.sort((a, b) => priority(b) - priority(a))
   let best = -Infinity
 
-  for (const move of moves) {
+  for (const { move, chance } of moves) {
     checkTime(deadline)
-    game.move(move)
-    let score: number
-    try {
-      score = -search(game, depth - 1, -beta, -alpha, ply + 1, deadline)
-    } finally {
-      game.undo()
-    }
+    const score = scoreMove(game, move, chance, depth, alpha, beta, ply, deadline)
     best = Math.max(best, score)
     alpha = Math.max(alpha, score)
     if (alpha >= beta) break
@@ -151,10 +178,10 @@ export function getComputerMove(fen: string, level: number): ComputerMove | null
   const game = new Chess(fen)
   if (game.isGameOver()) return null
 
-  const moves = game.moves({ verbose: true }).sort((a, b) => priority(b) - priority(a))
+  const moves = orderedMoves(game)
   if (moves.length === 0) return null
-  let bestMove = moves[0]
-  if (moves.length === 1 || bestMove.san.endsWith('#')) return toComputerMove(bestMove)
+  let bestMove = moves[0].move
+  if (moves.length === 1 || (moves[0].chance === null && bestMove.san.endsWith('#'))) return toComputerMove(bestMove)
 
   for (let currentDepth = 1; currentDepth <= depth; currentDepth += 1) {
     let iterationBest = bestMove
@@ -162,15 +189,9 @@ export function getComputerMove(fen: string, level: number): ComputerMove | null
     const scores = new Map<Move, number>()
 
     try {
-      for (const move of moves) {
+      for (const { move, chance } of moves) {
         checkTime(deadline)
-        game.move(move)
-        let score: number
-        try {
-          score = -search(game, currentDepth - 1, -Infinity, -bestScore, 1, deadline)
-        } finally {
-          game.undo()
-        }
+        const score = scoreMove(game, move, chance, currentDepth, bestScore, Infinity, 0, deadline)
         checkTime(deadline)
         scores.set(move, score)
         if (score > bestScore) {
@@ -185,7 +206,7 @@ export function getComputerMove(fen: string, level: number): ComputerMove | null
 
     bestMove = iterationBest
     if (bestScore >= mateScore - currentDepth) break
-    moves.sort((a, b) => (scores.get(b) ?? -Infinity) - (scores.get(a) ?? -Infinity))
+    moves.sort((a, b) => (scores.get(b.move) ?? -Infinity) - (scores.get(a.move) ?? -Infinity))
   }
 
   return toComputerMove(bestMove)

@@ -10,6 +10,8 @@ import {
   Swords, Users, Volume2, VolumeX, X,
 } from 'lucide-react'
 import { ChessPiece } from './ChessPiece'
+import { getCaptureOdds, isCaptureGameOver, isCaptureRepetition, resolveMove } from './capture'
+import type { CaptureAttempt } from './capture'
 import type { EngineResponse } from './engine.worker'
 import type { ComputerMove } from './engine'
 import { acceptAnswer, createAnswer, createOffer, extractCode, inviteLink } from './pvp'
@@ -26,18 +28,37 @@ const NAMES: Record<PieceSymbol, string> = { p: 'Pawn', n: 'Knight', b: 'Bishop'
 const START_TIME = 600
 const SAVE_KEY = 'chess-club-game-v1'
 const ARCHIVE_KEY = 'chess-club-archive-v1'
-type EndReason = 'resigned' | 'timeout-w' | 'timeout-b' | null
+type EndReason = 'resigned' | 'timeout-w' | 'timeout-b' | 'capture-w' | 'capture-b' | null
 type ModalType = 'new' | 'resign' | 'result' | 'learn' | 'archive' | 'preferences' | 'join' | 'link' | null
 type Settings = { sound: boolean; hints: boolean; coordinates: boolean; theme: 'sage' | 'walnut' | 'slate' }
-type SavedGame = { pgn: string; playerColor: Color; level: number; seconds: Record<Color, number>; timed: boolean; endReason: EndReason; id: string; settings: Settings; mode?: PlayMode; resignColor?: Color | null }
+type GameRecord = { startFen: string; moves: string[]; headers: Record<string, string>; comments: { fen: string; comment: string }[] }
+type SavedGame = { pgn: string; playerColor: Color; level: number; seconds: Record<Color, number>; timed: boolean; endReason: EndReason; id: string; settings: Settings; mode?: PlayMode; resignColor?: Color | null; captures?: CaptureAttempt[]; record?: GameRecord }
 type ArchivedGame = { id: string; pgn: string; title: string; date: string; moves: number; color: Color; level: number; mode?: PlayMode }
 type PendingGame = { mode: PlayMode; color: Color; level: number; timed: boolean; id: string }
 const DEFAULT_SETTINGS: Settings = { sound: true, hints: true, coordinates: true, theme: 'sage' }
 
+function restoreSavedGame(data: Partial<SavedGame>) {
+  if (!data.record) {
+    const game = new Chess()
+    if (data.pgn) game.loadPgn(data.pgn)
+    return game
+  }
+  const game = new Chess(data.record.startFen)
+  const comments = new Map(data.record.comments.map(entry => [entry.fen, entry.comment]))
+  const restoreComment = () => {
+    const comment = comments.get(game.fen())
+    if (comment) game.setComment(comment)
+  }
+  restoreComment()
+  data.record.moves.forEach(move => { game.move(move); restoreComment() })
+  Object.entries(data.record.headers).forEach(([key, value]) => game.setHeader(key, value))
+  return game
+}
+
 function readSavedGame(): Partial<SavedGame> {
   try {
     const data = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}') as Partial<SavedGame>
-    if (data.pgn) new Chess().loadPgn(data.pgn)
+    restoreSavedGame(data)
     return data
   } catch { return {} }
 }
@@ -74,7 +95,7 @@ function IconButton({ children, label, onClick, disabled = false, className = ''
 
 function App() {
   const [initial] = useState(readSavedGame)
-  const [game] = useState(() => { const chess = new Chess(); if (initial.pgn) chess.loadPgn(initial.pgn); return chess })
+  const [game] = useState(() => restoreSavedGame(initial))
   const [fen, setFen] = useState(game.fen())
   const [gameId, setGameId] = useState(initial.id || crypto.randomUUID())
   const [playerColor, setPlayerColor] = useState<Color>(initial.playerColor || 'w')
@@ -83,6 +104,8 @@ function App() {
   const [timed, setTimed] = useState(initial.timed ?? true)
   const [settings, setSettings] = useState<Settings>({ ...DEFAULT_SETTINGS, ...initial.settings })
   const [endReason, setEndReason] = useState<EndReason>(initial.endReason || null)
+  const [captures, setCaptures] = useState<CaptureAttempt[]>(Array.isArray(initial.captures) ? initial.captures : [])
+  const [captureEffect, setCaptureEffect] = useState<CaptureAttempt | null>(null)
   const [selected, setSelected] = useState<Square | null>(null)
   const [flipped, setFlipped] = useState(false)
   const [modal, setModal] = useState<ModalType>(null)
@@ -119,24 +142,30 @@ function App() {
   const modeRef = useRef(mode)
   const playerRef = useRef(playerColor)
   const secondsRef = useRef(seconds)
+  const endRef = useRef(endReason)
+  endRef.current = endReason
   modeRef.current = mode
   playerRef.current = playerColor
   secondsRef.current = seconds
   const history = game.history({ verbose: true })
-  const finished = game.isGameOver() || endReason !== null
+  const finished = isCaptureGameOver(game) || endReason !== null
   const computerColor: Color = playerColor === 'w' ? 'b' : 'w'
   const isComputerTurn = mode === 'computer' && !linkBusy && game.turn() === computerColor && !finished
   const isReversed = (playerColor === 'b') !== flipped
   const isReview = reviewPly !== null
-  const activePly = reviewPly ?? history.length
-  const displayGame = isReview ? new Chess() : game
+  const plyCount = history.length + (endReason?.startsWith('capture') && captures.at(-1)?.ply === history.length + 1 ? 1 : 0)
+  const activePly = reviewPly ?? plyCount
+  const displayGame = isReview ? new Chess(history[0]?.before || game.fen()) : game
   if (isReview) history.slice(0, activePly).forEach(move => displayGame.move(move.san))
-  const lastMove = history[activePly - 1]
+  const lastCapture = captures.find(capture => capture.ply === activePly)
+  const lastMove = lastCapture || history[activePly - 1]
+  const recentCapture = isReview ? lastCapture : captures.at(-1)
   const onlineWait = mode === 'online' && linkPhase !== 'open'
   const ourTurn = game.turn() === playerColor
   const movesLocked = finished || isReview || isComputerTurn || !ourTurn || onlineWait || linkBusy
   const possibleMoves = selected && !movesLocked ? game.moves({ square: selected, verbose: true }) : []
   const legalSquares = possibleMoves.map(move => move.to)
+  const captureOptions = possibleMoves.filter(move => move.captured && (!move.promotion || move.promotion === 'q')).map(move => ({ move, odds: getCaptureOdds(game, move)! }))
   const colorName = playerColor === 'w' ? 'white' : 'black'
   const rows = Array.from({ length: 8 }, (_, index) => isReversed ? index + 1 : 8 - index)
   const files = (isReversed ? 'hgfedcba' : 'abcdefgh').split('')
@@ -144,9 +173,11 @@ function App() {
     ? (resignColor === 'w' ? 'b' : resignColor === 'b' ? 'w' : computerColor)
     : endReason?.startsWith('timeout')
       ? (endReason === 'timeout-w' ? 'b' : 'w')
-      : game.isCheckmate()
-        ? (game.turn() === 'w' ? 'b' : 'w')
-        : null
+      : endReason?.startsWith('capture')
+        ? (endReason === 'capture-w' ? 'b' : 'w')
+        : game.isCheckmate()
+          ? (game.turn() === 'w' ? 'b' : 'w')
+          : null
   const resultTitle = winner
     ? (winner === playerColor ? 'Well played. You win!' : 'A good game. A new lesson.')
     : 'An evenly matched game.'
@@ -158,15 +189,17 @@ function App() {
       ? (mode === 'computer'
         ? `${winner === playerColor ? 'The computer' : 'You'} ran out of time.`
         : `${endReason === 'timeout-w' ? 'White' : 'Black'} ran out of time.`)
-      : game.isCheckmate()
-        ? `Checkmate. ${winner === 'w' ? 'White' : 'Black'} wins.`
-        : game.isStalemate()
-          ? 'A draw by stalemate.'
-          : game.isThreefoldRepetition()
-            ? 'A draw by threefold repetition.'
-            : game.isInsufficientMaterial()
-              ? 'A draw by insufficient material.'
-              : 'The game ends in a draw.'
+      : endReason?.startsWith('capture')
+        ? `The capture failed to escape check. ${winner === 'w' ? 'White' : 'Black'} wins.`
+        : game.isCheckmate()
+          ? `Checkmate. ${winner === 'w' ? 'White' : 'Black'} wins.`
+          : game.isStalemate()
+            ? 'A draw by stalemate.'
+            : isCaptureRepetition(game)
+              ? 'A draw by threefold repetition.'
+              : game.isInsufficientMaterial()
+                ? 'A draw by insufficient material.'
+                : 'The game ends in a draw.'
   const statusText = finished
     ? (mode === 'computer'
       ? (winner === playerColor ? 'You win. Well played!' : winner ? 'The computer wins' : 'Draw — well played')
@@ -188,20 +221,42 @@ function App() {
 
   useEffect(() => { soundRef.current = settings.sound }, [settings.sound])
 
-  const commitMove = useCallback((move: ComputerMove, remote = false) => {
+  useEffect(() => {
+    if (!captureEffect) return
+    const timer = setTimeout(() => setCaptureEffect(null), captureEffect.success ? 1400 : 2600)
+    return () => clearTimeout(timer)
+  }, [captureEffect])
+
+  const commitMove = useCallback((move: ComputerMove, remote = false, roll?: number) => {
+    if (endRef.current || isCaptureGameOver(game)) return false
     try {
-      const result = game.move(move)
-      if (result) {
-        setFen(game.fen())
-        setSelected(null)
-        setPromotion(null)
-        setReviewPly(null)
-        if (soundRef.current) playMoveSound(Boolean(result.captured))
-        if (!remote && modeRef.current === 'online' && linkRef.current?.phase === 'open') {
-          linkRef.current.send({ type: 'move', from: move.from, to: move.to, promotion: move.promotion, fen: game.fen(), pgn: game.pgn(), seconds: secondsRef.current })
-        }
+      const before = game.fen()
+      const result = resolveMove(game, move, roll)
+      if (result.capture) {
+        const capture = result.capture
+        setCaptures(current => [...current, capture])
+        setCaptureEffect(capture)
+        game.setHeader('Variant', 'Probabilistic captures')
+        const comment = `${NAMES[capture.piece]} ${capture.from}-${capture.to}: capture ${capture.success ? 'succeeded' : 'failed'}; chance ${capture.chance}%; roll ${(capture.roll * 100).toFixed(1)}%.${result.defeated ? ' Failed escape from check loses the game.' : ''}`
+        game.setComment([game.getComment(), comment].filter(Boolean).join(' '))
       }
-    } catch { setSelected(null) }
+      if (result.defeated) {
+        const reason = result.defeated === 'w' ? 'capture-w' : 'capture-b'
+        endRef.current = reason
+        game.setHeader('Result', result.defeated === 'w' ? '0-1' : '1-0')
+        game.setHeader('Termination', 'Failed capture from check')
+        setEndReason(reason)
+      }
+      setFen(game.fen())
+      setSelected(null)
+      setPromotion(null)
+      setReviewPly(null)
+      if (soundRef.current) playMoveSound(Boolean(result.capture?.success))
+      if (!remote && modeRef.current === 'online' && linkRef.current?.phase === 'open') {
+        linkRef.current.send({ type: 'move', from: move.from, to: move.to, promotion: move.promotion, before, roll: result.capture?.roll, fen: game.fen(), pgn: game.pgn(), seconds: secondsRef.current })
+      }
+      return true
+    } catch { setSelected(null); return false }
   }, [game])
 
   useEffect(() => {
@@ -240,22 +295,24 @@ function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(SAVE_KEY, JSON.stringify({ pgn: game.pgn(), playerColor, level, seconds, timed, endReason, id: gameId, settings, mode, resignColor }))
+      const moves = game.history({ verbose: true })
+      const record: GameRecord = { startFen: moves[0]?.before || game.fen(), moves: moves.map(move => move.san), headers: game.getHeaders(), comments: game.getComments() }
+      localStorage.setItem(SAVE_KEY, JSON.stringify({ pgn: game.pgn(), playerColor, level, seconds, timed, endReason, id: gameId, settings, mode, resignColor, captures, record }))
     } catch { return }
-  }, [fen, game, playerColor, level, seconds, timed, endReason, gameId, settings, mode, resignColor])
+  }, [fen, game, playerColor, level, seconds, timed, endReason, gameId, settings, mode, resignColor, captures])
 
   useEffect(() => {
     if (!finished) return
     setModal('result')
-    const entry: ArchivedGame = { id: gameId, pgn: game.pgn(), title: resultDetail, date: new Date().toISOString(), moves: Math.ceil(game.history().length / 2), color: playerColor, level, mode }
+    const entry: ArchivedGame = { id: gameId, pgn: game.pgn(), title: resultDetail, date: new Date().toISOString(), moves: Math.ceil(plyCount / 2), color: playerColor, level, mode }
     setArchive(current => {
       const next = [entry, ...current.filter(item => item.id !== gameId)].slice(0, 30)
       try { localStorage.setItem(ARCHIVE_KEY, JSON.stringify(next)) } catch { return next }
       return next
     })
-  }, [finished, gameId, game, resultDetail, playerColor, level, mode])
+  }, [finished, gameId, game, resultDetail, playerColor, level, mode, plyCount])
 
-  useEffect(() => { historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' }) }, [history.length])
+  useEffect(() => { historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' }) }, [plyCount])
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(''), 3000); return () => clearTimeout(timer) } }, [toast])
 
   useEffect(() => {
@@ -293,17 +350,12 @@ function App() {
 
   function applyRemote(message: PvpMessage) {
     if (message.type === 'move') {
-      if (game.turn() === playerRef.current) return
-      try {
-        const result = game.move({ from: message.from, to: message.to, promotion: message.promotion })
-        if (!result) return
-        setFen(game.fen())
-        setSelected(null)
-        setPromotion(null)
-        setReviewPly(null)
-        if (message.seconds) setSeconds(message.seconds)
-        if (soundRef.current) playMoveSound(Boolean(result.captured))
-      } catch { return }
+      if (game.turn() === playerRef.current || endRef.current || isCaptureGameOver(game)) return
+      if (message.before !== undefined && message.before !== game.fen()) return
+      const legal = game.moves({ verbose: true }).find(move => move.from === message.from && move.to === message.to && move.promotion === message.promotion)
+      if (!legal || (legal.captured && message.roll === undefined)) return
+      const applied = commitMove({ from: message.from, to: message.to, promotion: message.promotion }, true, message.roll)
+      if (applied && message.seconds) setSeconds(message.seconds)
       return
     }
     if (message.type === 'resign') {
@@ -347,7 +399,10 @@ function App() {
     setMode(next.mode)
     setTimed(next.timed)
     setSeconds({ w: START_TIME, b: START_TIME })
+    endRef.current = null
     setEndReason(null)
+    setCaptures([])
+    setCaptureEffect(null)
     setResignColor(null)
     setSelected(null)
     setPromotion(null)
@@ -413,7 +468,10 @@ function App() {
   function undoMove() {
     if (!history.length || finished || mode === 'online') return
     game.undo()
+    setCaptureEffect(null)
     if (mode === 'computer' && game.turn() !== playerColor && game.history().length) game.undo()
+    setCaptures(current => current.filter(capture => capture.ply <= game.history().length))
+    game.getComments()
     setFen(game.fen())
     setSelected(null)
     setReviewPly(null)
@@ -558,7 +616,12 @@ function App() {
 
   function navigateModal(value: ModalType) { setMobileMenu(false); setModal(value) }
   function updateSetting<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings(current => ({ ...current, [key]: value })) }
-  function reviewMove(ply: number) { setSelected(null); setReviewPly(ply >= history.length ? null : Math.max(0, ply)) }
+  function reviewMove(ply: number) { setSelected(null); setReviewPly(ply >= plyCount ? null : Math.max(0, ply)) }
+
+  function moveLabel(ply: number) {
+    const capture = captures.find(attempt => attempt.ply === ply + 1)
+    return capture && !capture.success ? `${capture.from}×${capture.to} failed` : history[ply]?.san || '—'
+  }
 
   function capturedPieces(color: Color) {
     const pieces = history.filter(move => move.color === color && move.captured).map(move => move.captured!)
@@ -673,11 +736,20 @@ function App() {
                 const piece = displayGame.get(square)
                 const dark = (file.charCodeAt(0) - 97 + rank) % 2 === 1
                 const isLegal = legalSquares.includes(square) && settings.hints
+                const capture = isLegal ? captureOptions.find(option => option.move.to === square) : undefined
                 const isLast = lastMove?.from === square || lastMove?.to === square
                 const isCheck = piece?.type === 'k' && piece.color === displayGame.turn() && displayGame.isCheck()
-                return <button key={square} type="button" data-square={square} className={`square ${dark ? 'dark' : 'light'} ${selected === square ? 'selected' : ''} ${isLast ? 'last-move' : ''} ${isCheck ? 'in-check' : ''} ${isLegal && piece ? 'can-capture' : ''}`} aria-label={`${square}${piece ? `, ${piece.color === 'w' ? 'white' : 'black'} ${NAMES[piece.type].toLowerCase()}` : ', empty'}${isLegal ? ', legal move' : ''}`} aria-pressed={selected === square} onClick={() => clickSquare(square)} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const from = event.dataTransfer.getData('text/plain'); if (/^[a-h][1-8]$/.test(from)) attemptMove(from as Square, square) }}>
-                  {piece && <span className="piece-container" draggable={piece.color === activeColor && !movesLocked} onDragStart={event => { if (piece.color !== activeColor || movesLocked) { event.preventDefault(); return } setSelected(square); event.dataTransfer.setData('text/plain', square); event.dataTransfer.effectAllowed = 'move' }}><ChessPiece type={piece.type} color={piece.color} /></span>}
-                  {isLegal && !piece && <span className="legal-dot" />}
+                const isCapturedSquare = captureEffect?.success && captureEffect.to === square
+                const isFailedFrom = captureEffect && !captureEffect.success && captureEffect.from === square
+                const isFailedTo = captureEffect && !captureEffect.success && captureEffect.to === square
+                return <button key={square} type="button" data-square={square} className={`square ${dark ? 'dark' : 'light'} ${selected === square ? 'selected' : ''} ${isLast ? 'last-move' : ''} ${isCheck ? 'in-check' : ''} ${capture ? 'can-capture' : ''} ${isCapturedSquare ? 'capture-success-square' : ''} ${isFailedFrom ? 'capture-failed-from' : ''} ${isFailedTo ? 'capture-failed-to' : ''}`} aria-label={`${square}${piece ? `, ${piece.color === 'w' ? 'white' : 'black'} ${NAMES[piece.type].toLowerCase()}` : ', empty'}${isLegal ? ', legal move' : ''}${capture ? `, ${capture.odds.chance}% capture chance` : ''}`} title={capture ? `Capture: ${capture.odds.chance}%. Strength ${capture.odds.strengthBonus >= 0 ? '+' : ''}${capture.odds.strengthBonus}. Support ${capture.odds.supportBonus >= 0 ? '+' : ''}${capture.odds.supportBonus}.` : undefined} aria-pressed={selected === square} onClick={() => clickSquare(square)} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const from = event.dataTransfer.getData('text/plain'); if (/^[a-h][1-8]$/.test(from)) attemptMove(from as Square, square) }}>
+                  {piece && <span className={`piece-container ${captureEffect && !captureEffect.success && captureEffect.from === square ? 'piece-repelled' : ''} ${isCapturedSquare ? 'piece-captured' : ''}`} draggable={piece.color === activeColor && !movesLocked} onDragStart={event => { if (piece.color !== activeColor || movesLocked) { event.preventDefault(); return } setSelected(square); event.dataTransfer.setData('text/plain', square); event.dataTransfer.effectAllowed = 'move' }}><ChessPiece type={piece.type} color={piece.color} /></span>}
+                  {isLegal && !piece && !capture && <span className="legal-dot" />}
+                  {capture && <span className="capture-badge" aria-hidden="true">{capture.odds.chance}%</span>}
+                  {isFailedFrom && <span className="capture-effect-label capture-blocked-label" aria-hidden="true">BLOCKED</span>}
+                  {isFailedTo && <span className="capture-effect-label capture-held-label" aria-hidden="true">HELD</span>}
+                  {isCapturedSquare && <span className="capture-effect-label capture-taken-label" aria-hidden="true">CAPTURED</span>}
+                  {isFailedTo && <span className="capture-burst" aria-hidden="true"><i /><i /><i /><i /></span>}
                 </button>
               }))}
             </div>
@@ -685,6 +757,17 @@ function App() {
           </div>
           {playerBar(false)}
           <div className="board-toolbar"><div className={`turn-status ${isComputerTurn ? 'thinking' : ''} ${finished ? 'finished-status' : ''}`} aria-live="polite"><span className="status-dot" />{statusText}{isComputerTurn && <span className="thinking-dots"><i /><i /><i /></span>}</div><div className="board-tools"><IconButton label="Flip board" onClick={() => setFlipped(value => !value)}><RotateCcw size={17} className="flip-icon" /></IconButton><IconButton label={settings.sound ? 'Mute sound' : 'Enable sound'} onClick={() => updateSetting('sound', !settings.sound)}>{settings.sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</IconButton><span className="tool-divider" /><IconButton label="Board preferences" onClick={() => setModal('preferences')}><Settings2 size={18} /></IconButton></div></div>
+          <div className="capture-notice"><Swords size={15} /><span>Captures are uncertain. A failed capture uses your turn.</span><button onClick={() => setModal('learn')}>Rules</button></div>
+          {captureEffect && !captureEffect.success && <div className="capture-fail-banner" role="alert" key={captureEffect.ply}>
+            <span className="capture-fail-icon"><ShieldCheck size={26} /></span>
+            <div><span className="capture-fail-kicker">Capture failed</span><strong>{NAMES[captureEffect.piece]} repelled at {captureEffect.to}</strong><span>The {NAMES[captureEffect.target].toLowerCase()} held the square. No piece moves, and the turn passes.</span></div>
+            <div className="capture-roll-fail"><strong>{captureEffect.chance}%</strong><span>Roll {(captureEffect.roll * 100).toFixed(1)} / 100 ✕</span></div>
+          </div>}
+          {recentCapture && <div className={`capture-result ${recentCapture.success ? 'capture-success' : 'capture-failure'}`} role="status">
+            <span className="capture-result-icon">{recentCapture.success ? <Check size={20} /> : <ShieldCheck size={20} />}</span>
+            <div><strong>{recentCapture.success ? 'Capture succeeded' : 'Capture failed'} · {recentCapture.from} → {recentCapture.to}</strong><span>{recentCapture.color === 'w' ? 'White' : 'Black'} {NAMES[recentCapture.piece].toLowerCase()} vs {NAMES[recentCapture.target].toLowerCase()}. {recentCapture.success ? 'The defender leaves the board.' : 'Both pieces stay in place.'}</span></div>
+            <div className="capture-roll"><strong>{recentCapture.chance}%</strong><span>Roll {(recentCapture.roll * 100).toFixed(1)} / 100</span></div>
+          </div>}
           {isReview && <div className="board-help"><button onClick={() => setReviewPly(null)}><ArrowLeft size={15} />Back to the live game</button></div>}
           {!isReview && linkPhase !== 'idle' && linkPhase !== 'open' && linkPhase !== 'closed' && modal !== 'link' && <div className="board-help"><button onClick={() => setModal('link')}>{linkRole === 'host' ? 'Show the invite' : 'Show the connection'}</button></div>}
         </section>
@@ -714,7 +797,17 @@ function App() {
                   <ChevronDown size={16} />
                 </div>
               </div> : <div className="opponent-settings"><p className="friend-note">Moves wait until the link is open.</p></div>}
-              <div className="history-section"><div className="history-heading"><span className="section-label">Move history</span><span className="move-count">{history.length === 0 ? 'A fresh start' : `${Math.ceil(history.length / 2)} ${history.length < 3 ? 'move' : 'moves'}`}</span><IconButton label="Download game PGN" onClick={() => downloadPgn()}><ArrowDownToLine size={15} /></IconButton></div><div className={`move-history ${history.length === 0 ? 'empty-history' : ''}`} ref={historyRef}>{history.length === 0 ? <div className="empty-history-content"><p>Your moves will appear here.</p></div> : <><div className="history-column-labels"><span>#</span><span>White</span><span>Black</span></div>{Array.from({ length: Math.ceil(history.length / 2) }, (_, index) => <div className="move-row" key={index}><span className="move-number">{index + 1}.</span>{[index * 2, index * 2 + 1].map(ply => <button key={ply} disabled={!history[ply]} className={activePly === ply + 1 ? 'current-move' : ''} onClick={() => reviewMove(ply + 1)}>{history[ply]?.san || '—'}</button>)}</div>)}</>}</div><div className="history-navigation"><span>{isReview ? 'REVIEW' : 'LIVE GAME'}<i className={isReview ? 'review-dot' : ''} /></span><div><IconButton label="First position" disabled={!history.length || activePly === 0} onClick={() => reviewMove(0)}><ChevronsLeft size={17} /></IconButton><IconButton label="Previous move" disabled={!history.length || activePly === 0} onClick={() => reviewMove(activePly - 1)}><ChevronLeft size={17} /></IconButton><IconButton label="Next move" disabled={!isReview} onClick={() => reviewMove(activePly + 1)}><ChevronRight size={17} /></IconButton><IconButton label="Latest position" disabled={!isReview} onClick={() => setReviewPly(null)}><ChevronsRight size={17} /></IconButton></div></div></div>
+              <div className="capture-panel" aria-label="Capture odds">
+                <div className="capture-heading"><Swords size={16} /><span className="section-label">Capture odds</span><span>40–95%</span></div>
+                {captureOptions.length ? <div className="capture-options">{captureOptions.map(({ move, odds }) => <button type="button" key={move.to} onClick={() => attemptMove(move.from, move.to)} aria-label={`Attempt capture on ${move.to}, ${odds.chance}% chance`}>
+                  <div><strong>{odds.chance}%</strong><span>{NAMES[move.captured!]} on {move.to}</span></div>
+                  <small>Strength {odds.strengthBonus >= 0 ? '+' : ''}{odds.strengthBonus} · Support {odds.supportBonus >= 0 ? '+' : ''}{odds.supportBonus}</small>
+                  <small>{odds.attackers} allies · {odds.defenders} defenders</small>
+                </button>)}</div> : <p>Select a piece to see its capture chances.</p>}
+                <p className="capture-rule">Strength and support change the odds. A random roll decides each capture.</p>
+                {game.isCheck() && !finished && <p className="capture-warning">A failed capture from check loses the game.</p>}
+              </div>
+              <div className="history-section"><div className="history-heading"><span className="section-label">Move history</span><span className="move-count">{plyCount === 0 ? 'A fresh start' : `${Math.ceil(plyCount / 2)} ${plyCount < 3 ? 'move' : 'moves'}`}</span><IconButton label="Download game PGN" onClick={() => downloadPgn()}><ArrowDownToLine size={15} /></IconButton></div><div className={`move-history ${plyCount === 0 ? 'empty-history' : ''}`} ref={historyRef}>{plyCount === 0 ? <div className="empty-history-content"><p>Your moves will appear here.</p></div> : <><div className="history-column-labels"><span>#</span><span>White</span><span>Black</span></div>{Array.from({ length: Math.ceil(plyCount / 2) }, (_, index) => <div className="move-row" key={index}><span className="move-number">{index + 1}.</span>{[index * 2, index * 2 + 1].map(ply => <button key={ply} disabled={!history[ply] && !captures.some(capture => capture.ply === ply + 1)} className={activePly === ply + 1 ? 'current-move' : ''} onClick={() => reviewMove(ply + 1)}>{moveLabel(ply)}</button>)}</div>)}</>}</div><div className="history-navigation"><span>{isReview ? 'REVIEW' : 'LIVE GAME'}<i className={isReview ? 'review-dot' : ''} /></span><div><IconButton label="First position" disabled={!plyCount || activePly === 0} onClick={() => reviewMove(0)}><ChevronsLeft size={17} /></IconButton><IconButton label="Previous move" disabled={!plyCount || activePly === 0} onClick={() => reviewMove(activePly - 1)}><ChevronLeft size={17} /></IconButton><IconButton label="Next move" disabled={!isReview} onClick={() => reviewMove(activePly + 1)}><ChevronRight size={17} /></IconButton><IconButton label="Latest position" disabled={!isReview} onClick={() => setReviewPly(null)}><ChevronsRight size={17} /></IconButton></div></div></div>
             </> : <>{settingsContent()}<div className="settings-back"><button className="secondary-button" onClick={() => setPanelTab('game')}><ArrowLeft size={16} />Back to the game</button></div></>}
           </div>
         </aside>
@@ -723,14 +816,14 @@ function App() {
 
     {toast && <div className="toast" role="status"><Check size={17} />{toast}</div>}
     {(modal || promotion) && <div className="modal-backdrop" onClick={event => { if (event.target === event.currentTarget) { setModal(null); setPromotion(null) } }}><div className={`modal ${modal === 'learn' ? 'learn-modal' : ''} ${modal === 'archive' ? 'archive-modal' : ''}`} ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="modal-title"><IconButton label="Close dialog" className="modal-close" onClick={() => { setModal(null); setPromotion(null) }}><X size={20} /></IconButton>
-      {promotion ? <><h2 id="modal-title">Choose your new piece.</h2><p>Your pawn made it to the other side.</p><div className="promotion-options">{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(type => <button key={type} onClick={() => commitMove({ ...promotion, promotion: type })} aria-label={`Promote to ${NAMES[type].toLowerCase()}`}><ChessPiece type={type} color={activeColor} /><span>{NAMES[type]}</span></button>)}</div></> : modal === 'new' ? <><h2 id="modal-title">A new game. All possibility.</h2><p>{history.length && !finished ? 'This will replace your current game.' : 'Settle in. The board is yours.'}</p><div className="new-game-settings">{modeOptions()}<label>Play as</label><div className="color-options"><button className={newColor === 'w' ? 'chosen' : ''} onClick={() => setNewColor('w')}><ChessPiece type="k" color="w" /><span>White</span>{newColor === 'w' && <Check size={13} />}</button><button className={newColor === 'b' ? 'chosen' : ''} onClick={() => setNewColor('b')}><ChessPiece type="k" color="b" /><span>Black</span>{newColor === 'b' && <Check size={13} />}</button><button className={newColor === 'random' ? 'chosen' : ''} onClick={() => setNewColor('random')}><Sparkles size={25} /><span>Surprise me</span>{newColor === 'random' && <Check size={13} />}</button></div>{newMode === 'computer' && <><label htmlFor="new-difficulty">Your challenge</label><div className="form-select"><select id="new-difficulty" value={newLevel} onChange={event => setNewLevel(Number(event.target.value))}>{LEVELS.map((item, index) => <option key={item.name} value={index + 1}>{item.name} — Level {index + 1}</option>)}</select><ChevronDown size={16} /></div></>}<label htmlFor="time-control">Time control</label><div className="form-select"><select id="time-control" value={newTimed ? '10' : 'none'} onChange={event => setNewTimed(event.target.value === '10')}><option value="10">10 minutes · A little focus</option><option value="none">No clock · Take your time</option></select><Clock3 size={16} /></div></div>{newGameFooter()}</> : modal === 'join' ? joinContent() : modal === 'link' ? linkContent() : modal === 'resign' ? <><h2 id="modal-title">Call it a good game?</h2>{mode === 'computer' ? <p>If you resign, the computer wins this game.<br />There is always another board, another chance.</p> : <p>If you resign, your friend wins this game.</p>}<div className="modal-button-row"><button className="secondary-button" onClick={() => setModal(null)}>Keep playing</button><button className="primary-button" onClick={confirmResign}>Resign game</button></div></> : modal === 'result' ? <><h2 id="modal-title">{resultTitle}</h2><p>{resultDetail}</p><div className="result-stats"><div><strong>{Math.ceil(history.length / 2)}</strong><span>moves played</span></div><div><strong>{opponentLabel}</strong><span>your opponent</span></div></div><button className="primary-button" onClick={() => openNewGame(mode)}><Plus size={18} />Another game<ArrowRight size={18} /></button><button className="text-button" onClick={() => setModal(null)}>Take a look at the board</button></> : modal === 'preferences' ? <><h2 id="modal-title">The little details.</h2>{settingsContent()}</> : modal === 'learn' ? <><h2 id="modal-title">A simple game. Endless depth.</h2><p>Select a piece, then select a destination. You can also drag pieces.</p><p>Your goal: put the other king in check, with no legal escape. That is checkmate.</p><div className="piece-guide">{([
+      {promotion ? <><h2 id="modal-title">Choose your new piece.</h2><p>Choose the piece for a successful promotion.</p><div className="promotion-options">{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(type => <button key={type} onClick={() => commitMove({ ...promotion, promotion: type })} aria-label={`Promote to ${NAMES[type].toLowerCase()}`}><ChessPiece type={type} color={activeColor} /><span>{NAMES[type]}</span></button>)}</div></> : modal === 'new' ? <><h2 id="modal-title">A new game. All possibility.</h2><p>{history.length && !finished ? 'This will replace your current game.' : 'Settle in. The board is yours.'}</p><div className="new-game-settings">{modeOptions()}<label>Play as</label><div className="color-options"><button className={newColor === 'w' ? 'chosen' : ''} onClick={() => setNewColor('w')}><ChessPiece type="k" color="w" /><span>White</span>{newColor === 'w' && <Check size={13} />}</button><button className={newColor === 'b' ? 'chosen' : ''} onClick={() => setNewColor('b')}><ChessPiece type="k" color="b" /><span>Black</span>{newColor === 'b' && <Check size={13} />}</button><button className={newColor === 'random' ? 'chosen' : ''} onClick={() => setNewColor('random')}><Sparkles size={25} /><span>Surprise me</span>{newColor === 'random' && <Check size={13} />}</button></div>{newMode === 'computer' && <><label htmlFor="new-difficulty">Your challenge</label><div className="form-select"><select id="new-difficulty" value={newLevel} onChange={event => setNewLevel(Number(event.target.value))}>{LEVELS.map((item, index) => <option key={item.name} value={index + 1}>{item.name} — Level {index + 1}</option>)}</select><ChevronDown size={16} /></div></>}<label htmlFor="time-control">Time control</label><div className="form-select"><select id="time-control" value={newTimed ? '10' : 'none'} onChange={event => setNewTimed(event.target.value === '10')}><option value="10">10 minutes · A little focus</option><option value="none">No clock · Take your time</option></select><Clock3 size={16} /></div></div>{newGameFooter()}</> : modal === 'join' ? joinContent() : modal === 'link' ? linkContent() : modal === 'resign' ? <><h2 id="modal-title">Call it a good game?</h2>{mode === 'computer' ? <p>If you resign, the computer wins this game.<br />There is always another board, another chance.</p> : <p>If you resign, your friend wins this game.</p>}<div className="modal-button-row"><button className="secondary-button" onClick={() => setModal(null)}>Keep playing</button><button className="primary-button" onClick={confirmResign}>Resign game</button></div></> : modal === 'result' ? <><h2 id="modal-title">{resultTitle}</h2><p>{resultDetail}</p><div className="result-stats"><div><strong>{Math.ceil(plyCount / 2)}</strong><span>moves played</span></div><div><strong>{opponentLabel}</strong><span>your opponent</span></div></div><button className="primary-button" onClick={() => openNewGame(mode)}><Plus size={18} />Another game<ArrowRight size={18} /></button><button className="text-button" onClick={() => setModal(null)}>Take a look at the board</button></> : modal === 'preferences' ? <><h2 id="modal-title">The little details.</h2>{settingsContent()}</> : modal === 'learn' ? <><h2 id="modal-title">A simple game. Endless depth.</h2><p>Select a piece, then select a destination. You can also drag pieces.</p><p>Your goal: put the other king in check, with no legal escape. That is checkmate.</p><div className="piece-guide">{([
         ['k', 'The King', 'One square in any direction. Keep your king safe.'],
         ['q', 'The Queen', 'Any distance in a straight line, in any direction.'],
         ['r', 'The Rook', 'Any distance along a rank or file.'],
         ['b', 'The Bishop', 'Any distance on a diagonal.'],
         ['n', 'The Knight', 'Two squares, then one to the side. It can jump over pieces.'],
         ['p', 'The Pawn', 'One square forward, two on its first move. Captures one square diagonally.'],
-      ] as [PieceSymbol, string, string][]).map(([type, name, description]) => <div key={type}><span><ChessPiece type={type} color="w" /></span><h3>{name}</h3><p>{description}</p></div>)}</div><div className="special-rules"><details><summary>Three special moves<ChevronDown size={16} /></summary><p><strong>Castling:</strong> Move your king two squares toward a rook to move both pieces. Neither piece can have moved. The king cannot cross an attacked square.</p><p><strong>En passant:</strong> When a pawn advances two squares beside your pawn, you can capture it as if it moved one square. This is only possible on the next move.</p><p><strong>Promotion:</strong> A pawn that reaches the last rank becomes a queen, rook, bishop, or knight.</p></details><details><summary>A good place to start<Lightbulb size={16} /></summary><p>Control the center with your pawns. Develop your knights and bishops. Castle to protect your king. Before every move, look for threats.</p></details></div><button className="primary-button" onClick={() => setModal(null)}>Back to the board<ArrowRight size={17} /></button></> : modal === 'archive' ? <><h2 id="modal-title">Your time at the board.</h2><p>Finished games stay here, on this device.</p>{archive.length ? <div className="archive-list">{archive.map(item => <div className="archive-item" key={item.id}><span className="archive-game-icon"><Swords size={22} /></span><div><strong>{item.title}</strong><span>{new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {item.moves} moves · {item.mode && item.mode !== 'computer' ? 'Friend' : LEVELS[item.level - 1].name}</span></div><IconButton label="Download saved game" onClick={() => downloadPgn(item.pgn, item.id)}><ArrowDownToLine size={18} /></IconButton></div>)}</div> : <div className="archive-empty"><ChessPiece type="n" color="w" /><h3>Your story starts with a game.</h3><p>Finish your first game to add it to your collection.</p></div>}<button className="primary-button" onClick={() => setModal(null)}>Back to your game<ArrowRight size={18} /></button></> : null}
+      ] as [PieceSymbol, string, string][]).map(([type, name, description]) => <div key={type}><span><ChessPiece type={type} color="w" /></span><h3>{name}</h3><p>{description}</p></div>)}</div><div className="special-rules"><details open><summary>Probabilistic captures<ChevronDown size={16} /></summary><p>Each legal capture starts with a 70% chance. Piece strength and tactical support change this chance.</p><p><strong>Strength:</strong> Pawn 1, knight 3, bishop 3, rook 5, queen 9, king 4. Each strength point of advantage adds 3 percentage points, with a limit of 15.</p><p><strong>Support:</strong> Each extra ally that attacks the destination adds 8 percentage points. Each piece that protects the defender subtracts 8. The total support change has a limit of 16 points.</p><p>The chance stays between 40% and 95%. A uniform random roll below the chance succeeds. The roll uses the same rules for both players.</p><p>A failed capture keeps both pieces in place and uses the turn. En passant also uses these odds. Promotion occurs only after success.</p><p><strong>Check:</strong> A failed capture from check loses the game. Moves without a capture follow normal chess rules.</p><p>For en passant, protection refers to the captured pawn’s square. Support uses geometric attacks, which include pinned pieces.</p></details><details><summary>Three special moves<ChevronDown size={16} /></summary><p><strong>Castling:</strong> Move your king two squares toward a rook to move both pieces. Neither piece can have moved. The king cannot cross an attacked square.</p><p><strong>En passant:</strong> When a pawn advances two squares beside your pawn, you can capture it as if it moved one square. This is only possible on the next move.</p><p><strong>Promotion:</strong> A pawn that reaches the last rank becomes a queen, rook, bishop, or knight.</p></details><details><summary>A good place to start<Lightbulb size={16} /></summary><p>Control the center with your pawns. Develop your knights and bishops. Castle to protect your king. Before every move, look for threats.</p></details></div><button className="primary-button" onClick={() => setModal(null)}>Back to the board<ArrowRight size={17} /></button></> : modal === 'archive' ? <><h2 id="modal-title">Your time at the board.</h2><p>Finished games stay here, on this device.</p>{archive.length ? <div className="archive-list">{archive.map(item => <div className="archive-item" key={item.id}><span className="archive-game-icon"><Swords size={22} /></span><div><strong>{item.title}</strong><span>{new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {item.moves} moves · {item.mode && item.mode !== 'computer' ? 'Friend' : LEVELS[item.level - 1].name}</span></div><IconButton label="Download saved game" onClick={() => downloadPgn(item.pgn, item.id)}><ArrowDownToLine size={18} /></IconButton></div>)}</div> : <div className="archive-empty"><ChessPiece type="n" color="w" /><h3>Your story starts with a game.</h3><p>Finish your first game to add it to your collection.</p></div>}<button className="primary-button" onClick={() => setModal(null)}>Back to your game<ArrowRight size={18} /></button></> : null}
     </div></div>}
   </div>
 }

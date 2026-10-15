@@ -12,7 +12,7 @@ export type OfferMeta = {
 export type PvpMessage =
   | { type: 'hello'; color: Color; timed: boolean; gameId: string }
   | { type: 'ready' }
-  | { type: 'move'; from: string; to: string; promotion?: string; fen?: string; pgn?: string; seconds?: { w: number; b: number } }
+  | { type: 'move'; from: string; to: string; promotion?: string; before?: string; roll?: number; fen?: string; pgn?: string; seconds?: { w: number; b: number } }
   | { type: 'resign'; color: Color }
   | { type: 'timeout'; color: Color }
   | { type: 'draw'; accept?: boolean }
@@ -74,7 +74,9 @@ export function parseMessage(data: string): PvpMessage | null {
     const message = JSON.parse(data) as PvpMessage
     if (message.type === 'hello' && isColor(message.color) && typeof message.timed === 'boolean' && typeof message.gameId === 'string') return message
     if (message.type === 'ready') return message
-    if (message.type === 'move' && isSquare(message.from) && isSquare(message.to) && isPromotion(message.promotion)) return message
+    if (message.type === 'move' && isSquare(message.from) && isSquare(message.to) && isPromotion(message.promotion)
+      && (message.before === undefined || typeof message.before === 'string')
+      && (message.roll === undefined || (typeof message.roll === 'number' && Number.isFinite(message.roll) && message.roll >= 0 && message.roll < 1))) return message
     if ((message.type === 'resign' || message.type === 'timeout') && isColor(message.color)) return message
     if (message.type === 'draw' && (message.accept === undefined || typeof message.accept === 'boolean')) return message
     if (message.type === 'undo' && (message.accept === undefined || typeof message.accept === 'boolean')) return message

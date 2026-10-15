@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest'
+import { Chess } from 'chess.js'
+import { resolveMove } from './capture'
 import { decodeSignal, encodeSignal, extractCode, parseMessage } from './pvp'
 
 const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\n'
@@ -28,6 +30,35 @@ describe('friend messages', () => {
     expect(parseMessage(JSON.stringify({ type: 'draw', accept: false }))).toMatchObject({ accept: false })
     expect(parseMessage('{"type":"hack"}')).toBeNull()
     expect(parseMessage('nope')).toBeNull()
+  })
+
+  it('accepts one shared capture roll and rejects invalid rolls', () => {
+    const move = { type: 'move', from: 'e4', to: 'd5', before: 'position' }
+    for (const roll of [0, 0.7, 0.999999]) {
+      expect(parseMessage(JSON.stringify({ ...move, roll }))).toMatchObject({ roll })
+    }
+    for (const roll of [-0.1, 1, '0.5', null]) {
+      expect(parseMessage(JSON.stringify({ ...move, roll }))).toBeNull()
+    }
+    expect(parseMessage(JSON.stringify({ ...move, before: 4 }))).toBeNull()
+  })
+})
+
+describe('shared capture outcomes', () => {
+  it.each([0, 0.999999])('keeps both players in the same position with roll %s', roll => {
+    const sender = new Chess('7k/8/8/4p3/3P4/8/8/K7 w - - 0 1')
+    const receiver = new Chess(sender.fen())
+    const before = sender.fen()
+    const input = { from: 'd4', to: 'e5' }
+    const local = resolveMove(sender, input, roll)
+    const message = parseMessage(JSON.stringify({ type: 'move', ...input, before, roll: local.capture?.roll }))
+    expect(message?.type).toBe('move')
+    if (message?.type !== 'move') throw new Error('Expected a move message')
+    expect(message.before).toBe(receiver.fen())
+    const remote = resolveMove(receiver, message, message.roll)
+    expect(remote.capture).toEqual(local.capture)
+    expect(receiver.fen()).toBe(sender.fen())
+    expect(receiver.pgn()).toBe(sender.pgn())
   })
 })
 

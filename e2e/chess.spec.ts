@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import type { Page } from '@playwright/test'
 import { Chess, SQUARES } from 'chess.js'
 import type { Square } from 'chess.js'
+import type { CaptureAttempt } from '../src/capture'
 
 const SAVE_KEY = 'chess-club-game-v1'
 const ARCHIVE_KEY = 'chess-club-archive-v1'
@@ -13,7 +14,9 @@ type SavedGame = {
   level: number
   seconds: { w: number; b: number }
   timed: boolean
-  endReason: 'resigned' | 'timeout-w' | 'timeout-b' | null
+  endReason: 'resigned' | 'timeout-w' | 'timeout-b' | 'capture-w' | 'capture-b' | null
+  captures?: CaptureAttempt[]
+  record?: { startFen: string; moves: string[]; headers: Record<string, string>; comments: { fen: string; comment: string }[] }
   id: string
   settings: { sound: boolean; hints: boolean; coordinates: boolean; theme: 'sage' | 'walnut' | 'slate' }
 }
@@ -29,8 +32,21 @@ async function savedGame(page: Page): Promise<SavedGame> {
 }
 
 async function savedPosition(page: Page) {
-  const game = new Chess()
-  game.loadPgn((await savedGame(page)).pgn)
+  const saved = await savedGame(page)
+  if (!saved.record) {
+    const game = new Chess()
+    game.loadPgn(saved.pgn)
+    return game
+  }
+  const game = new Chess(saved.record.startFen)
+  const comments = new Map(saved.record.comments.map(entry => [entry.fen, entry.comment]))
+  const restoreComment = () => {
+    const comment = comments.get(game.fen())
+    if (comment) game.setComment(comment)
+  }
+  restoreComment()
+  saved.record.moves.forEach(move => { game.move(move); restoreComment() })
+  Object.entries(saved.record.headers).forEach(([key, value]) => game.setHeader(key, value))
   return game
 }
 
@@ -40,7 +56,7 @@ async function expectPosition(page: Page, game: Chess) {
     return [name, `${name}, ${piece ? `${piece.color === 'w' ? 'white' : 'black'} ${PIECE_NAMES[piece.type]}` : 'empty'}`]
   }))
   await expect.poll(() => board(page).locator('[data-square]').evaluateAll(squares =>
-    Object.fromEntries(squares.map(item => [item.getAttribute('data-square'), item.getAttribute('aria-label')?.replace(', legal move', '')])),
+    Object.fromEntries(squares.map(item => [item.getAttribute('data-square'), item.getAttribute('aria-label')?.replace(/, legal move(?:, \d+% capture chance)?/, '')])),
   )).toEqual(labels)
 }
 
@@ -78,6 +94,37 @@ async function seedGame(page: Page, pgn: string) {
   await page.reload()
   await expectPosition(page, game)
   return game
+}
+
+async function mockCaptureRoll(page: Page, value: 0 | 0xffffffff) {
+  await page.addInitScript(roll => {
+    const original = crypto.getRandomValues.bind(crypto)
+    const state = window as typeof window & { captureRolls: number }
+    state.captureRolls = 0
+    crypto.getRandomValues = <T extends ArrayBufferView | null>(array: T): T => {
+      if (array instanceof Uint32Array && array.length === 1) {
+        state.captureRolls += 1
+        array.fill(roll)
+        return array
+      }
+      return original(array)
+    }
+  }, value)
+  await page.reload()
+  await expect(board(page)).toBeVisible()
+}
+
+async function captureRolls(page: Page) {
+  return page.evaluate(() => (window as typeof window & { captureRolls: number }).captureRolls)
+}
+
+function expectQuietReplies(game: Chess) {
+  const passed = new Chess()
+  passed.loadPgn(game.pgn())
+  passed.move(null)
+  const replies = passed.moves({ verbose: true })
+  expect(replies.length).toBeGreaterThan(0)
+  expect(replies.every(move => !move.captured)).toBe(true)
 }
 
 async function expectNoOverflow(page: Page) {
@@ -328,6 +375,271 @@ test('settings control hints, coordinates, sound, and all board themes', async (
   await expect(page.getByRole('button', { name: 'Mute sound', exact: true })).toBeVisible()
 })
 
+test('capture odds appear before an equal unprotected pawn capture', async ({ page }) => {
+  const game = await seedGame(page, new Chess('7k/8/8/4p3/3P4/8/8/K7 w - - 0 1').pgn())
+  const original = (await savedGame(page)).pgn
+  await expect(board(page).locator('.capture-badge')).toHaveCount(0)
+  await expect(page.locator('.capture-result')).toHaveCount(0)
+  await square(page, 'd4').click()
+  await expect(square(page, 'e5').locator('.capture-badge')).toHaveText('70%')
+  await expect(square(page, 'e5')).toHaveAccessibleName('e5, black pawn, legal move, 70% capture chance')
+  await expect(page.getByRole('button', { name: 'Attempt capture on e5, 70% chance', exact: true })).toBeVisible()
+  await expectPosition(page, game)
+  await expect(moves(page)).toHaveCount(0)
+  await expect(page.locator('.capture-result')).toHaveCount(0)
+  expect((await savedGame(page)).pgn).toBe(original)
+  expect((await savedGame(page)).captures ?? []).toEqual([])
+})
+
+test('a successful capture persists its outcome and log across reload and take back', async ({ page }) => {
+  const original = await seedGame(page, new Chess('7k/8/8/4p3/3P4/8/8/K7 w - - 0 1').pgn())
+  await mockCaptureRoll(page, 0)
+  await square(page, 'd4').click()
+  await expect(square(page, 'e5').locator('.capture-badge')).toHaveText('70%')
+  await square(page, 'e5').click()
+  await expect(moves(page)).toHaveCount(2)
+  await expect(page.locator('.turn-status')).toHaveText('Your move')
+  const outcome = page.locator('.capture-result')
+  await expect(outcome).toHaveClass(/capture-success/)
+  await expect(outcome).toContainText('Capture succeeded')
+  await expect(outcome).toContainText('d4 → e5')
+  await expect(outcome).toContainText('70%')
+  await expect(square(page, 'd4')).toHaveAccessibleName('d4, empty')
+  await expect(square(page, 'e5')).toHaveAccessibleName('e5, white pawn')
+  const saved = await savedGame(page)
+  expect(saved.captures).toEqual([expect.objectContaining({
+    ply: 1, from: 'd4', to: 'e5', piece: 'p', target: 'p', color: 'w',
+    chance: 70, strengthBonus: 0, supportBonus: 0, attackers: 0, defenders: 0, roll: 0, success: true,
+  })])
+  expect(saved.endReason).toBeNull()
+  const captured = await savedPosition(page)
+  expect(captured.history()[0]).toBe('dxe5')
+  expect(captured.history({ verbose: true })[1]).toMatchObject({ color: 'b' })
+  expect(captured.history({ verbose: true })[1].captured).toBeUndefined()
+  await expectPosition(page, captured)
+  expect(await captureRolls(page)).toBe(1)
+  await page.reload()
+  await expectPosition(page, captured)
+  await expect(outcome).toHaveClass(/capture-success/)
+  await expect(outcome).toContainText('Capture succeeded')
+  expect((await savedGame(page)).captures).toEqual(saved.captures)
+  expect((await savedGame(page)).pgn).toBe(saved.pgn)
+  expect(await captureRolls(page)).toBe(0)
+  await page.getByRole('button', { name: 'Take back', exact: true }).click()
+  await expectPosition(page, original)
+  await expect(moves(page)).toHaveCount(0)
+  await expect(outcome).toHaveCount(0)
+  await expect.poll(async () => (await savedGame(page)).captures).toEqual([])
+  expect((await savedPosition(page)).history()).toEqual([])
+  await page.reload()
+  await expectPosition(page, original)
+  await expect(outcome).toHaveCount(0)
+  expect((await savedGame(page)).captures).toEqual([])
+  expect(await captureRolls(page)).toBe(0)
+})
+
+test('a failed capture keeps both pieces, consumes the turn, and permits a quiet computer reply', async ({ page }) => {
+  const original = await seedGame(page, new Chess('8/8/8/R3p2k/3PP3/8/8/K7 w - - 0 1').pgn())
+  expectQuietReplies(original)
+  await mockCaptureRoll(page, 0xffffffff)
+  await square(page, 'd4').click()
+  await expect(square(page, 'e5').locator('.capture-badge')).toHaveText('78%')
+  await square(page, 'e5').click()
+  await expect(moves(page)).toHaveCount(2)
+  await expect(page.locator('.turn-status')).toHaveText('Your move')
+  await expect(moves(page).first()).toHaveText('d4×e5 failed')
+  const outcome = page.locator('.capture-result')
+  await expect(outcome).toHaveClass(/capture-failure/)
+  await expect(outcome).toContainText('Capture failed')
+  await expect(outcome).toContainText('Both pieces stay in place.')
+  await expect(square(page, 'd4')).toHaveAccessibleName('d4, white pawn')
+  await expect(square(page, 'e5')).toHaveAccessibleName('e5, black pawn')
+  const saved = await savedGame(page)
+  expect(saved.pgn).toMatch(/\b1\. --/)
+  expect(saved.captures).toEqual([expect.objectContaining({
+    ply: 1, from: 'd4', to: 'e5', piece: 'p', target: 'p', color: 'w',
+    chance: 78, roll: 0xffffffff / 2 ** 32, success: false,
+  })])
+  expect(saved.endReason).toBeNull()
+  const failed = await savedPosition(page)
+  expect(failed.history()[0]).toBe('--')
+  const history = failed.history({ verbose: true })
+  expect(history[0].before.split(' ')[0]).toBe(original.fen().split(' ')[0])
+  expect(history[0].after.split(' ')[0]).toBe(original.fen().split(' ')[0])
+  expect(history[0].after.split(' ')[1]).toBe('b')
+  expect(history[1]).toMatchObject({ color: 'b', piece: 'k' })
+  expect(history[1].captured).toBeUndefined()
+  expect(failed.turn()).toBe('w')
+  await expectPosition(page, failed)
+  expect(await captureRolls(page)).toBe(1)
+  await page.reload()
+  await expectPosition(page, failed)
+  await expect(moves(page)).toHaveCount(2)
+  await expect(moves(page).first()).toHaveText('d4×e5 failed')
+  await expect(outcome).toHaveClass(/capture-failure/)
+  expect((await savedGame(page)).pgn).toBe(saved.pgn)
+  expect((await savedGame(page)).captures).toEqual(saved.captures)
+  expect(await captureRolls(page)).toBe(0)
+  await page.getByRole('button', { name: 'Take back', exact: true }).click()
+  await expectPosition(page, original)
+  await expect(moves(page)).toHaveCount(0)
+  await expect(outcome).toHaveCount(0)
+  await expect.poll(async () => (await savedGame(page)).captures).toEqual([])
+  expect((await savedPosition(page)).history()).toEqual([])
+  await page.reload()
+  await expectPosition(page, original)
+  await expect(outcome).toHaveCount(0)
+  expect((await savedGame(page)).captures).toEqual([])
+})
+
+test('a failed capture from check ends the game without changing the board', async ({ page }) => {
+  const original = await seedGame(page, new Chess('R3r3/7k/8/8/8/8/8/4K3 w - - 0 1').pgn())
+  expect(original.isCheck()).toBe(true)
+  expect(original.moves()).toContain('Rxe8')
+  await mockCaptureRoll(page, 0xffffffff)
+  await square(page, 'a8').click()
+  await expect(square(page, 'e8').locator('.capture-badge')).toHaveText('70%')
+  await square(page, 'e8').click()
+  const dialog = page.getByRole('dialog', { name: 'A good game. A new lesson.', exact: true })
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('The capture failed to escape check.')
+  await expect(dialog).toContainText('Black wins.')
+  await expectPosition(page, original)
+  await expect(page.locator('.capture-result')).toHaveClass(/capture-failure/)
+  await expect(moves(page)).toHaveCount(1)
+  await expect(moves(page).first()).toHaveText('a8×e8 failed')
+  await expect.poll(async () => (await savedGame(page)).endReason).toBe('capture-w')
+  const saved = await savedGame(page)
+  expect(saved.captures).toEqual([expect.objectContaining({
+    ply: 1, from: 'a8', to: 'e8', piece: 'r', target: 'r', color: 'w',
+    chance: 70, roll: 0xffffffff / 2 ** 32, success: false,
+  })])
+  expect((await savedPosition(page)).fen()).toBe(original.fen())
+  expect((await savedPosition(page)).history()).toEqual([])
+  await expect(page.getByRole('button', { name: 'Take back', exact: true })).toBeDisabled()
+  expect(await square(page, 'e1').evaluate(element => {
+    const bounds = element.getBoundingClientRect()
+    return Boolean(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)?.closest('.modal-backdrop'))
+  })).toBe(true)
+  await square(page, 'e1').dispatchEvent('click')
+  await square(page, 'd1').dispatchEvent('click')
+  await expect(square(page, 'e1')).toHaveAttribute('aria-pressed', 'false')
+  await expectPosition(page, original)
+  expect((await savedGame(page)).pgn).toBe(saved.pgn)
+  expect((await savedGame(page)).captures).toEqual(saved.captures)
+  expect(await captureRolls(page)).toBe(1)
+  await dialog.getByRole('button', { name: 'Take a look at the board', exact: true }).click()
+  await page.getByRole('button', { name: 'First position', exact: true }).click()
+  await expect(page.locator('.history-navigation')).toContainText('REVIEW')
+  await expect(page.locator('.capture-result')).toHaveCount(0)
+  await expectPosition(page, original)
+  await page.getByRole('button', { name: 'Latest position', exact: true }).click()
+  await expect(page.locator('.capture-result')).toHaveClass(/capture-failure/)
+  await expect(moves(page).first()).toHaveText('a8×e8 failed')
+  await page.reload()
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toContainText('The capture failed to escape check.')
+  await expectPosition(page, original)
+  expect((await savedGame(page)).endReason).toBe('capture-w')
+  expect((await savedGame(page)).captures).toEqual(saved.captures)
+  expect(await captureRolls(page)).toBe(0)
+})
+
+test('en passant shows capture odds and removes the captured pawn on success', async ({ page }) => {
+  const original = await seedGame(page, new Chess('7k/8/8/3Pp3/8/8/8/K7 w - e6 0 2').pgn())
+  expect(original.moves({ verbose: true }).find(move => move.from === 'd5' && move.to === 'e6')?.isEnPassant()).toBe(true)
+  await mockCaptureRoll(page, 0)
+  await square(page, 'd5').click()
+  await expect(square(page, 'e6').locator('.capture-badge')).toHaveText('70%')
+  await expect(square(page, 'e6')).toHaveAccessibleName('e6, empty, legal move, 70% capture chance')
+  await expectPosition(page, original)
+  await square(page, 'e6').click()
+  await expect(moves(page)).toHaveCount(2)
+  await expect(page.locator('.turn-status')).toHaveText('Your move')
+  await expect(square(page, 'd5')).toHaveAccessibleName('d5, empty')
+  await expect(square(page, 'e5')).toHaveAccessibleName('e5, empty')
+  await expect(square(page, 'e6')).toHaveAccessibleName('e6, white pawn')
+  await expect(page.locator('.capture-result')).toHaveClass(/capture-success/)
+  const saved = await savedGame(page)
+  expect(saved.captures).toEqual([expect.objectContaining({
+    ply: 1, from: 'd5', to: 'e6', target: 'p', chance: 70, roll: 0, success: true,
+  })])
+  const captured = await savedPosition(page)
+  expect(captured.history({ verbose: true })[0].isEnPassant()).toBe(true)
+  await expectPosition(page, captured)
+  expect(await captureRolls(page)).toBe(1)
+  await page.reload()
+  await expectPosition(page, captured)
+  await expect(page.locator('.capture-result')).toHaveClass(/capture-success/)
+  expect((await savedGame(page)).captures).toEqual(saved.captures)
+  expect(await captureRolls(page)).toBe(0)
+})
+
+test('a failed capture promotion leaves the pawn unpromoted', async ({ page }) => {
+  const original = await seedGame(page, new Chess('r6k/1P6/8/8/8/8/8/7K w - - 0 1').pgn())
+  expectQuietReplies(original)
+  expect(original.moves()).toContain('bxa8=Q+')
+  await mockCaptureRoll(page, 0xffffffff)
+  await square(page, 'b7').click()
+  await expect(square(page, 'a8').locator('.capture-badge')).toHaveText('58%')
+  await square(page, 'a8').click()
+  const dialog = page.getByRole('dialog', { name: 'Choose your new piece.', exact: true })
+  await expect(dialog).toBeVisible()
+  await expectPosition(page, original)
+  expect((await savedGame(page)).captures ?? []).toEqual([])
+  expect(await captureRolls(page)).toBe(0)
+  await dialog.getByRole('button', { name: 'Promote to queen', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expect(moves(page)).toHaveCount(2)
+  await expect(moves(page).first()).toHaveText('b7×a8 failed')
+  await expect(square(page, 'b7')).toHaveAccessibleName('b7, white pawn')
+  await expect(board(page).getByRole('button', { name: /, white queen/ })).toHaveCount(0)
+  await expect(page.locator('.capture-result')).toHaveClass(/capture-failure/)
+  const saved = await savedGame(page)
+  expect(saved.captures).toEqual([expect.objectContaining({
+    ply: 1, from: 'b7', to: 'a8', piece: 'p', target: 'r', chance: 58,
+    roll: 0xffffffff / 2 ** 32, success: false,
+  })])
+  const failed = await savedPosition(page)
+  expect(failed.history()[0]).toBe('--')
+  expect(failed.history({ verbose: true })[0].after.split(' ')[0]).toBe(original.fen().split(' ')[0])
+  expect(failed.history({ verbose: true })[0].promotion).toBeUndefined()
+  expect(failed.history({ verbose: true })[1].captured).toBeUndefined()
+  expect(failed.turn()).toBe('w')
+  await expectPosition(page, failed)
+  expect(await captureRolls(page)).toBe(1)
+  await page.reload()
+  await expectPosition(page, failed)
+  await expect(dialog).toBeHidden()
+  await expect(square(page, 'b7')).toHaveAccessibleName('b7, white pawn')
+  expect((await savedGame(page)).captures).toEqual(saved.captures)
+  expect(await captureRolls(page)).toBe(0)
+})
+
+test('How to play explains capture odds and failure rules', async ({ page, isMobile }) => {
+  if (isMobile) await page.getByRole('button', { name: 'Open navigation', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Main navigation' }).getByRole('button', { name: 'How to play', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'A simple game. Endless depth.', exact: true })
+  await expect(dialog).toBeVisible()
+  const rules = dialog.locator('details').filter({ hasText: 'Probabilistic captures' })
+  await expect(rules.getByText('Probabilistic captures', { exact: true })).toBeVisible()
+  for (const text of [
+    'Each legal capture starts with a 70% chance.',
+    'Each strength point of advantage adds 3 percentage points',
+    'Each extra ally that attacks the destination adds 8 percentage points.',
+    'Each piece that protects the defender subtracts 8.',
+    'The chance stays between 40% and 95%.',
+    'A uniform random roll below the chance succeeds.',
+    'A failed capture keeps both pieces in place and uses the turn.',
+    'En passant also uses these odds.',
+    'Promotion occurs only after success.',
+    'A failed capture from check loses the game.',
+  ]) await expect(rules).toContainText(text)
+  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expectPosition(page, new Chess())
+})
+
 test('a legal seeded PGN permits king-side castling', async ({ page }) => {
   const game = await seedGame(page, '1. e4 e5 2. Nf3 Nc6 3. Bc4 Nf6')
   expect(game.moves()).toContain('O-O')
@@ -347,6 +659,7 @@ test('a legal seeded PGN permits king-side castling', async ({ page }) => {
 
 test('a legal seeded PGN permits promotion to a chosen piece', async ({ page }) => {
   const game = await seedGame(page, '1. a4 h5 2. a5 h4 3. a6 h3 4. axb7 hxg2')
+  await mockCaptureRoll(page, 0)
   expect(game.moves()).toContain('bxa8=Q')
   await square(page, 'b7').click()
   await square(page, 'a8').click()
@@ -531,6 +844,20 @@ async function hostInvite(page: Page, color: 'White' | 'Black') {
   return { invite, link, code: await invite.locator('.room-code').innerText() }
 }
 
+async function nextCaptureRoll(page: Page, roll: 0 | 0xffffffff) {
+  await page.evaluate(value => {
+    const original = crypto.getRandomValues.bind(crypto)
+    crypto.getRandomValues = <T extends ArrayBufferView | null>(array: T): T => {
+      if (array instanceof Uint32Array && array.length === 1) {
+        crypto.getRandomValues = original
+        array.fill(value)
+        return array
+      }
+      return original(array)
+    }
+  }, roll)
+}
+
 async function expectConnected(white: Page, black: Page) {
   for (const player of [white, black]) {
     await expect(player.getByRole('dialog')).toBeHidden({ timeout: 40_000 })
@@ -552,6 +879,30 @@ async function expectConnected(white: Page, black: Page) {
   await expect(moves(black)).toHaveText(['e4', 'e5'])
   await expect(white).not.toHaveURL(/#play\//)
   await expect(black).not.toHaveURL(/#play\//)
+  await square(white, 'd2').click()
+  await square(white, 'd4').click()
+  await expect(black.locator('.turn-status')).toHaveText('Your move')
+  await nextCaptureRoll(black, 0)
+  await square(black, 'e5').click()
+  await square(black, 'd4').click()
+  for (const player of [white, black]) {
+    await expect(player.locator('.capture-result')).toHaveClass(/capture-success/)
+    await expect(square(player, 'd4')).toHaveAccessibleName('d4, black pawn')
+    await expect(square(player, 'e5')).toHaveAccessibleName('e5, empty')
+  }
+  await expect(white.locator('.turn-status')).toHaveText('Your move')
+  await nextCaptureRoll(white, 0xffffffff)
+  await square(white, 'd1').click()
+  await square(white, 'd4').click()
+  for (const player of [white, black]) {
+    await expect(player.locator('.capture-result')).toHaveClass(/capture-failure/)
+    await expect(square(player, 'd1')).toHaveAccessibleName('d1, white queen')
+    await expect(square(player, 'd4')).toHaveAccessibleName('d4, black pawn')
+    await expect(moves(player)).toHaveCount(5)
+  }
+  await expect(black.locator('.turn-status')).toHaveText('Your move')
+  expect((await savedGame(white)).captures).toEqual((await savedGame(black)).captures)
+  expect((await savedPosition(white)).fen()).toBe((await savedPosition(black)).fen())
 }
 
 test.describe('online friends', () => {
