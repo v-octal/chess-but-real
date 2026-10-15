@@ -1,6 +1,6 @@
 import type { Color } from 'chess.js'
 
-export type PlayMode = 'computer' | 'local' | 'online'
+export type PlayMode = 'computer' | 'online'
 export type LinkPhase = 'gathering' | 'wait-reply' | 'wait-host' | 'connecting' | 'open' | 'failed' | 'closed'
 
 export type OfferMeta = {

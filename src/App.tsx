@@ -92,8 +92,8 @@ function App() {
   const [newColor, setNewColor] = useState<'w' | 'b' | 'random'>('w')
   const [newLevel, setNewLevel] = useState(level)
   const [newTimed, setNewTimed] = useState(timed)
-  const [newMode, setNewMode] = useState<PlayMode>('online')
-  const [mode, setMode] = useState<PlayMode>(initial.mode === 'computer' || initial.mode === 'online' ? initial.mode : initial.pgn && !initial.mode ? 'computer' : 'local')
+  const [newMode, setNewMode] = useState<PlayMode>('computer')
+  const [mode, setMode] = useState<PlayMode>(initial.mode === 'online' ? 'online' : 'computer')
   const [resignColor, setResignColor] = useState<Color | null>(initial.resignColor || null)
   const [linkPhase, setLinkPhase] = useState<LinkPhase | 'idle'>('idle')
   const [linkBusy, setLinkBusy] = useState(false)
@@ -133,7 +133,7 @@ function App() {
   if (isReview) history.slice(0, activePly).forEach(move => displayGame.move(move.san))
   const lastMove = history[activePly - 1]
   const onlineWait = mode === 'online' && linkPhase !== 'open'
-  const ourTurn = mode === 'local' || game.turn() === playerColor
+  const ourTurn = game.turn() === playerColor
   const movesLocked = finished || isReview || isComputerTurn || !ourTurn || onlineWait || linkBusy
   const possibleMoves = selected && !movesLocked ? game.moves({ square: selected, verbose: true }) : []
   const legalSquares = possibleMoves.map(move => move.to)
@@ -147,17 +147,13 @@ function App() {
       : game.isCheckmate()
         ? (game.turn() === 'w' ? 'b' : 'w')
         : null
-  const resultTitle = mode === 'local'
-    ? (winner ? `${winner === 'w' ? 'White' : 'Black'} wins.` : 'An evenly matched game.')
-    : winner
-      ? (winner === playerColor ? 'Well played. You win!' : 'A good game. A new lesson.')
-      : 'An evenly matched game.'
+  const resultTitle = winner
+    ? (winner === playerColor ? 'Well played. You win!' : 'A good game. A new lesson.')
+    : 'An evenly matched game.'
   const resultDetail = endReason === 'resigned'
     ? (mode === 'computer'
       ? 'You resigned. The computer wins.'
-      : mode === 'local'
-        ? `${resignColor === 'b' ? 'Black' : 'White'} resigned.`
-        : resignColor === playerColor ? 'You resigned.' : 'Your friend resigned.')
+      : resignColor === playerColor ? 'You resigned.' : 'Your friend resigned.')
     : endReason?.startsWith('timeout')
       ? (mode === 'computer'
         ? `${winner === playerColor ? 'The computer' : 'You'} ran out of time.`
@@ -176,20 +172,18 @@ function App() {
       ? (winner === playerColor ? 'You win. Well played!' : winner ? 'The computer wins' : 'Draw — well played')
       : winner ? `${winner === 'w' ? 'White' : 'Black'} wins` : 'Draw')
     : onlineWait
-      ? (linkPhase === 'idle' ? 'This link ended. Start a new game.' : 'The link is not open.')
+      ? (linkPhase === 'idle' ? (history.length ? 'This link ended. Start a new game.' : 'Invite a friend to start.') : 'The link is not open.')
       : isReview
         ? `Move ${Math.ceil(activePly / 2)} · Review`
-        : mode === 'local'
-          ? `${game.turn() === 'w' ? 'White' : 'Black'} to move`
-          : mode === 'computer'
-            ? (isComputerTurn ? 'The computer is thinking' : game.isCheck() ? 'You are in check' : 'Your move')
-            : game.turn() !== playerColor
-              ? 'Your friend has the next move.'
-              : game.isCheck()
-                ? 'You are in check'
-                : 'Your move'
-  const opponentLabel = mode === 'computer' ? LEVELS[level - 1].name : mode === 'local' ? 'Friend' : 'Online'
-  const activeColor: Color = mode === 'local' ? game.turn() : playerColor
+        : mode === 'computer'
+          ? (isComputerTurn ? 'The computer is thinking' : game.isCheck() ? 'You are in check' : 'Your move')
+          : game.turn() !== playerColor
+            ? 'Your friend has the next move.'
+            : game.isCheck()
+              ? 'You are in check'
+              : 'Your move'
+  const opponentLabel = mode === 'computer' ? LEVELS[level - 1].name : 'Online'
+  const activeColor: Color = playerColor
   const infoModal = modal === 'archive' || modal === 'learn' || modal === 'preferences'
 
   useEffect(() => { soundRef.current = settings.sound }, [settings.sound])
@@ -427,7 +421,7 @@ function App() {
     setToast('Move taken back. Take another look.')
   }
 
-  function openNewGame(preset: PlayMode = 'online') {
+  function openNewGame(preset: PlayMode = 'computer') {
     setNewColor(playerColor)
     setNewLevel(level)
     setNewTimed(timed)
@@ -544,7 +538,7 @@ function App() {
   }
 
   function confirmResign() {
-    const color = mode === 'local' ? game.turn() : playerColor
+    const color = playerColor
     setResignColor(color)
     setEndReason('resigned')
     setModal(null)
@@ -575,7 +569,7 @@ function App() {
     const color = computer ? computerColor : playerColor
     return <div className={`player-bar ${computer ? 'opponent-bar' : 'you-bar'}`}>
       <span className={`player-color color-${color === 'w' ? 'white' : 'black'}`} aria-hidden="true" />
-      <div className="player-info"><div className="player-name">{computer ? (mode === 'computer' ? 'The Computer' : 'Friend') : 'You'}</div><div className="player-subtitle">{computer ? (mode === 'computer' ? `${LEVELS[level - 1].name} · Level ${level}` : mode === 'local' ? 'Same device' : 'Online') : `Playing as ${colorName}`}{capturedPieces(color)}</div></div>
+      <div className="player-info"><div className="player-name">{computer ? (mode === 'computer' ? 'The Computer' : 'Friend') : 'You'}</div><div className="player-subtitle">{computer ? (mode === 'computer' ? `${LEVELS[level - 1].name} · Level ${level}` : 'Online') : `Playing as ${colorName}`}{capturedPieces(color)}</div></div>
       <div className={`clock ${!computer && !finished ? 'your-clock' : ''} ${game.turn() === color && history.length > 0 && !finished ? 'clock-active' : ''} ${seconds[color] < 60 && timed ? 'clock-low' : ''}`} aria-label={`${computer ? (mode === 'computer' ? 'Computer' : 'Friend') : 'Your'} time: ${formatTime(seconds[color])}`}><Clock3 size={16} />{timed ? formatTime(seconds[color]) : '∞'}</div>
     </div>
   }
@@ -594,7 +588,7 @@ function App() {
 
   function modeOptions() {
     return <><label id="opponent-label">Opponent</label><div className="mode-options" role="group" aria-labelledby="opponent-label">
-      {([['online', 'Online friend'], ['local', 'Same device'], ['computer', 'Computer']] as const).map(([value, label]) => <button key={value} type="button" className={newMode === value ? 'chosen' : ''} aria-pressed={newMode === value} onClick={() => setNewMode(value)}>{label}</button>)}
+      {([['online', 'Online friend'], ['computer', 'Computer']] as const).map(([value, label]) => <button key={value} type="button" className={newMode === value ? 'chosen' : ''} aria-pressed={newMode === value} onClick={() => setNewMode(value)}>{label}</button>)}
     </div></>
   }
 
@@ -602,7 +596,7 @@ function App() {
     return <>
       <button className="primary-button" onClick={() => { void startNewGame() }}>{newMode === 'online' ? <><Users size={18} />Create invite link</> : <>Let’s play<ArrowRight size={18} /></>}</button>
       {newMode === 'online' && <button className="text-button" onClick={openJoin}>I have a code</button>}
-      <div className="modal-footnote">{newMode === 'computer' ? 'White moves first. A good game starts here.' : newMode === 'local' ? 'Pass the device after each move.' : 'Send one short link. The game starts when your friend opens it.'}</div>
+      <div className="modal-footnote">{newMode === 'computer' ? 'White moves first. A good game starts here.' : 'Send one short link. The game starts when your friend opens it.'}</div>
       {linkError && <p className="link-error" role="alert">{linkError}</p>}
     </>
   }
@@ -719,7 +713,7 @@ function App() {
                   <select id="difficulty" aria-label="Computer difficulty" value={level} onChange={event => setLevel(Number(event.target.value))}>{LEVELS.map((item, index) => <option key={item.name} value={index + 1}>{item.name}</option>)}</select>
                   <ChevronDown size={16} />
                 </div>
-              </div> : <div className="opponent-settings"><p className="friend-note">{mode === 'local' ? 'Pass the device after each move.' : 'Moves wait until the link is open.'}</p></div>}
+              </div> : <div className="opponent-settings"><p className="friend-note">Moves wait until the link is open.</p></div>}
               <div className="history-section"><div className="history-heading"><span className="section-label">Move history</span><span className="move-count">{history.length === 0 ? 'A fresh start' : `${Math.ceil(history.length / 2)} ${history.length < 3 ? 'move' : 'moves'}`}</span><IconButton label="Download game PGN" onClick={() => downloadPgn()}><ArrowDownToLine size={15} /></IconButton></div><div className={`move-history ${history.length === 0 ? 'empty-history' : ''}`} ref={historyRef}>{history.length === 0 ? <div className="empty-history-content"><p>Your moves will appear here.</p></div> : <><div className="history-column-labels"><span>#</span><span>White</span><span>Black</span></div>{Array.from({ length: Math.ceil(history.length / 2) }, (_, index) => <div className="move-row" key={index}><span className="move-number">{index + 1}.</span>{[index * 2, index * 2 + 1].map(ply => <button key={ply} disabled={!history[ply]} className={activePly === ply + 1 ? 'current-move' : ''} onClick={() => reviewMove(ply + 1)}>{history[ply]?.san || '—'}</button>)}</div>)}</>}</div><div className="history-navigation"><span>{isReview ? 'REVIEW' : 'LIVE GAME'}<i className={isReview ? 'review-dot' : ''} /></span><div><IconButton label="First position" disabled={!history.length || activePly === 0} onClick={() => reviewMove(0)}><ChevronsLeft size={17} /></IconButton><IconButton label="Previous move" disabled={!history.length || activePly === 0} onClick={() => reviewMove(activePly - 1)}><ChevronLeft size={17} /></IconButton><IconButton label="Next move" disabled={!isReview} onClick={() => reviewMove(activePly + 1)}><ChevronRight size={17} /></IconButton><IconButton label="Latest position" disabled={!isReview} onClick={() => setReviewPly(null)}><ChevronsRight size={17} /></IconButton></div></div></div>
             </> : <>{settingsContent()}<div className="settings-back"><button className="secondary-button" onClick={() => setPanelTab('game')}><ArrowLeft size={16} />Back to the game</button></div></>}
           </div>
@@ -729,7 +723,7 @@ function App() {
 
     {toast && <div className="toast" role="status"><Check size={17} />{toast}</div>}
     {(modal || promotion) && <div className="modal-backdrop" onClick={event => { if (event.target === event.currentTarget) { setModal(null); setPromotion(null) } }}><div className={`modal ${modal === 'learn' ? 'learn-modal' : ''} ${modal === 'archive' ? 'archive-modal' : ''}`} ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="modal-title"><IconButton label="Close dialog" className="modal-close" onClick={() => { setModal(null); setPromotion(null) }}><X size={20} /></IconButton>
-      {promotion ? <><h2 id="modal-title">Choose your new piece.</h2><p>Your pawn made it to the other side.</p><div className="promotion-options">{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(type => <button key={type} onClick={() => commitMove({ ...promotion, promotion: type })} aria-label={`Promote to ${NAMES[type].toLowerCase()}`}><ChessPiece type={type} color={activeColor} /><span>{NAMES[type]}</span></button>)}</div></> : modal === 'new' ? <><h2 id="modal-title">A new game. All possibility.</h2><p>{history.length && !finished ? 'This will replace your current game.' : 'Settle in. The board is yours.'}</p><div className="new-game-settings">{modeOptions()}<label>Play as</label><div className="color-options"><button className={newColor === 'w' ? 'chosen' : ''} onClick={() => setNewColor('w')}><ChessPiece type="k" color="w" /><span>White</span>{newColor === 'w' && <Check size={13} />}</button><button className={newColor === 'b' ? 'chosen' : ''} onClick={() => setNewColor('b')}><ChessPiece type="k" color="b" /><span>Black</span>{newColor === 'b' && <Check size={13} />}</button><button className={newColor === 'random' ? 'chosen' : ''} onClick={() => setNewColor('random')}><Sparkles size={25} /><span>Surprise me</span>{newColor === 'random' && <Check size={13} />}</button></div>{newMode === 'computer' && <><label htmlFor="new-difficulty">Your challenge</label><div className="form-select"><select id="new-difficulty" value={newLevel} onChange={event => setNewLevel(Number(event.target.value))}>{LEVELS.map((item, index) => <option key={item.name} value={index + 1}>{item.name} — Level {index + 1}</option>)}</select><ChevronDown size={16} /></div></>}<label htmlFor="time-control">Time control</label><div className="form-select"><select id="time-control" value={newTimed ? '10' : 'none'} onChange={event => setNewTimed(event.target.value === '10')}><option value="10">10 minutes · A little focus</option><option value="none">No clock · Take your time</option></select><Clock3 size={16} /></div></div>{newGameFooter()}</> : modal === 'join' ? joinContent() : modal === 'link' ? linkContent() : modal === 'resign' ? <><h2 id="modal-title">Call it a good game?</h2>{mode === 'computer' ? <p>If you resign, the computer wins this game.<br />There is always another board, another chance.</p> : <p>{mode === 'local' ? 'The player to move resigns this game.' : 'If you resign, your friend wins this game.'}</p>}<div className="modal-button-row"><button className="secondary-button" onClick={() => setModal(null)}>Keep playing</button><button className="primary-button" onClick={confirmResign}>Resign game</button></div></> : modal === 'result' ? <><h2 id="modal-title">{resultTitle}</h2><p>{resultDetail}</p><div className="result-stats"><div><strong>{Math.ceil(history.length / 2)}</strong><span>moves played</span></div><div><strong>{opponentLabel}</strong><span>your opponent</span></div></div><button className="primary-button" onClick={() => openNewGame(mode)}><Plus size={18} />Another game<ArrowRight size={18} /></button><button className="text-button" onClick={() => setModal(null)}>Take a look at the board</button></> : modal === 'preferences' ? <><h2 id="modal-title">The little details.</h2>{settingsContent()}</> : modal === 'learn' ? <><h2 id="modal-title">A simple game. Endless depth.</h2><p>Select a piece, then select a destination. You can also drag pieces.</p><p>Your goal: put the other king in check, with no legal escape. That is checkmate.</p><div className="piece-guide">{([
+      {promotion ? <><h2 id="modal-title">Choose your new piece.</h2><p>Your pawn made it to the other side.</p><div className="promotion-options">{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(type => <button key={type} onClick={() => commitMove({ ...promotion, promotion: type })} aria-label={`Promote to ${NAMES[type].toLowerCase()}`}><ChessPiece type={type} color={activeColor} /><span>{NAMES[type]}</span></button>)}</div></> : modal === 'new' ? <><h2 id="modal-title">A new game. All possibility.</h2><p>{history.length && !finished ? 'This will replace your current game.' : 'Settle in. The board is yours.'}</p><div className="new-game-settings">{modeOptions()}<label>Play as</label><div className="color-options"><button className={newColor === 'w' ? 'chosen' : ''} onClick={() => setNewColor('w')}><ChessPiece type="k" color="w" /><span>White</span>{newColor === 'w' && <Check size={13} />}</button><button className={newColor === 'b' ? 'chosen' : ''} onClick={() => setNewColor('b')}><ChessPiece type="k" color="b" /><span>Black</span>{newColor === 'b' && <Check size={13} />}</button><button className={newColor === 'random' ? 'chosen' : ''} onClick={() => setNewColor('random')}><Sparkles size={25} /><span>Surprise me</span>{newColor === 'random' && <Check size={13} />}</button></div>{newMode === 'computer' && <><label htmlFor="new-difficulty">Your challenge</label><div className="form-select"><select id="new-difficulty" value={newLevel} onChange={event => setNewLevel(Number(event.target.value))}>{LEVELS.map((item, index) => <option key={item.name} value={index + 1}>{item.name} — Level {index + 1}</option>)}</select><ChevronDown size={16} /></div></>}<label htmlFor="time-control">Time control</label><div className="form-select"><select id="time-control" value={newTimed ? '10' : 'none'} onChange={event => setNewTimed(event.target.value === '10')}><option value="10">10 minutes · A little focus</option><option value="none">No clock · Take your time</option></select><Clock3 size={16} /></div></div>{newGameFooter()}</> : modal === 'join' ? joinContent() : modal === 'link' ? linkContent() : modal === 'resign' ? <><h2 id="modal-title">Call it a good game?</h2>{mode === 'computer' ? <p>If you resign, the computer wins this game.<br />There is always another board, another chance.</p> : <p>If you resign, your friend wins this game.</p>}<div className="modal-button-row"><button className="secondary-button" onClick={() => setModal(null)}>Keep playing</button><button className="primary-button" onClick={confirmResign}>Resign game</button></div></> : modal === 'result' ? <><h2 id="modal-title">{resultTitle}</h2><p>{resultDetail}</p><div className="result-stats"><div><strong>{Math.ceil(history.length / 2)}</strong><span>moves played</span></div><div><strong>{opponentLabel}</strong><span>your opponent</span></div></div><button className="primary-button" onClick={() => openNewGame(mode)}><Plus size={18} />Another game<ArrowRight size={18} /></button><button className="text-button" onClick={() => setModal(null)}>Take a look at the board</button></> : modal === 'preferences' ? <><h2 id="modal-title">The little details.</h2>{settingsContent()}</> : modal === 'learn' ? <><h2 id="modal-title">A simple game. Endless depth.</h2><p>Select a piece, then select a destination. You can also drag pieces.</p><p>Your goal: put the other king in check, with no legal escape. That is checkmate.</p><div className="piece-guide">{([
         ['k', 'The King', 'One square in any direction. Keep your king safe.'],
         ['q', 'The Queen', 'Any distance in a straight line, in any direction.'],
         ['r', 'The Rook', 'Any distance along a rank or file.'],
