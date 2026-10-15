@@ -63,7 +63,7 @@ async function seedGame(page: Page, pgn: string) {
   game.loadPgn(pgn)
   expect(game.turn()).toBe('w')
   expect(game.isGameOver()).toBe(false)
-  const saved: SavedGame = {
+  const saved: SavedGame & { mode: 'computer' } = {
     pgn: game.pgn(),
     playerColor: 'w',
     level: 1,
@@ -72,6 +72,7 @@ async function seedGame(page: Page, pgn: string) {
     endReason: null,
     id: 'e2e-seeded-game',
     settings: { sound: false, hints: true, coordinates: true, theme: 'sage' },
+    mode: 'computer',
   }
   await page.evaluate(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: SAVE_KEY, value: saved })
   await page.reload()
@@ -94,6 +95,20 @@ test.beforeEach(async ({ page }) => {
   await page.goto('./')
   await expect(board(page)).toBeVisible()
   await expect.poll(() => page.evaluate(key => localStorage.getItem(key), SAVE_KEY)).not.toBeNull()
+  const fresh: SavedGame & { mode: 'computer' } = {
+    pgn: '',
+    playerColor: 'w',
+    level: 3,
+    seconds: { w: 600, b: 600 },
+    timed: true,
+    endReason: null,
+    id: 'e2e-computer-game',
+    settings: { sound: true, hints: true, coordinates: true, theme: 'sage' },
+    mode: 'computer',
+  }
+  await page.evaluate(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: SAVE_KEY, value: fresh })
+  await page.reload()
+  await expect(page.locator('.opponent-bar')).toContainText('The Computer')
 })
 
 test('initial board contains 32 pieces and an empty history', async ({ page }) => {
@@ -351,6 +366,66 @@ test('a legal seeded PGN permits promotion to a chosen piece', async ({ page }) 
   await expectPosition(page, promoted)
 })
 
+test('game actions remain available in the settings tab', async ({ page }) => {
+  await playOpening(page)
+  await page.getByRole('tab', { name: 'Settings', exact: true }).click()
+  for (const name of ['New game', 'Take back', 'Resign']) {
+    await expect(page.getByRole('button', { name, exact: true })).toBeEnabled()
+  }
+  await page.getByRole('button', { name: 'Resign', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Keep playing', exact: true }).click()
+  await page.getByRole('button', { name: 'Take back', exact: true }).click()
+  await expectPosition(page, new Chess())
+  await expect(page.getByRole('switch', { name: 'Legal moves', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'New game', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'A new game. All possibility.' })
+  await expect(dialog.getByLabel('Your challenge')).toBeVisible()
+  await expect(dialog.getByLabel('Time control')).toBeVisible()
+  await dialog.getByRole('button', { name: 'Let’s play', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expectPosition(page, new Chess())
+})
+
+test('compact board tools retain difficulty, orientation, and sound controls', async ({ page }) => {
+  await page.getByLabel('Computer difficulty', { exact: true }).selectOption('4')
+  await expect(page.locator('.opponent-bar')).toContainText('Advanced · Level 4')
+  await page.getByRole('button', { name: 'Flip board', exact: true }).click()
+  await expect(board(page).locator('[data-square]').first()).toHaveAttribute('data-square', 'h1')
+  await page.getByRole('button', { name: 'Mute sound', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Enable sound', exact: true })).toBeVisible()
+  const game = await playOpening(page)
+  expect((await savedGame(page)).level).toBe(4)
+  await page.getByRole('button', { name: 'Flip board', exact: true }).click()
+  await expect(board(page).locator('[data-square]').first()).toHaveAttribute('data-square', 'a8')
+  await expectPosition(page, game)
+  const downloadEvent = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Download game PGN', exact: true }).click()
+  expect(await (await downloadEvent).failure()).toBeNull()
+})
+
+test('compact navigation keeps help, archives, and preferences accessible', async ({ page, isMobile }) => {
+  const navigation = page.getByRole('navigation', { name: 'Main navigation' })
+  for (const [name, title] of [
+    ['How to play', 'A simple game. Endless depth.'],
+    ['My games', 'Your time at the board.'],
+    ['Preferences', 'The little details.'],
+  ]) {
+    if (isMobile) await page.getByRole('button', { name: 'Open navigation', exact: true }).click()
+    await navigation.getByRole('button', { name, exact: true }).click()
+    const dialog = page.getByRole('dialog', { name: title, exact: true })
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+  }
+  if (isMobile) {
+    const open = page.getByRole('button', { name: 'Open navigation', exact: true })
+    await open.click()
+    await expect(open).toHaveAttribute('aria-expanded', 'true')
+    await page.getByRole('button', { name: 'Close navigation menu', exact: true }).click()
+    await expect(open).toHaveAttribute('aria-expanded', 'false')
+  }
+  await expectPosition(page, new Chess())
+})
+
 test.describe('mobile', () => {
   for (const width of [360, 390]) {
     test(`the board and controls fit a ${width}px viewport without horizontal overflow`, async ({ page }) => {
@@ -397,7 +472,141 @@ test.describe('mobile', () => {
     await open.click()
     await sidebar.getByRole('button', { name: 'Play computer', exact: true }).click()
     await expect(close).toHaveCount(0)
-    await expect(board(page)).toBeVisible()
+    const dialog = page.getByRole('dialog', { name: 'A new game. All possibility.' })
+    await expect(dialog.getByRole('button', { name: 'Computer', exact: true })).toHaveAttribute('aria-pressed', 'true')
     await expectNoOverflow(page)
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await open.click()
+    await sidebar.getByRole('button', { name: 'Play a friend', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Online friend', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await expect(dialog.getByRole('button', { name: 'Create invite link', exact: true })).toBeVisible()
+    await expectNoOverflow(page)
+    await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+    await expect(board(page)).toBeVisible()
+  })
+})
+
+test('same device play lets both colors move without the computer', async ({ page }) => {
+  await page.getByRole('button', { name: 'New game', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'A new game. All possibility.' })
+  await dialog.getByRole('button', { name: 'Same device', exact: true }).click()
+  await expect(dialog.getByLabel('Your challenge')).toHaveCount(0)
+  await dialog.getByLabel('Time control').selectOption('none')
+  await dialog.getByRole('button', { name: 'Let’s play', exact: true }).click()
+  await expect(dialog).toBeHidden()
+  await expect(page.locator('.turn-status')).toHaveText('White to move')
+  await expect(page.locator('.opponent-bar')).toContainText('Same device')
+  await square(page, 'e2').click()
+  await square(page, 'e4').click()
+  await expect(page.locator('.turn-status')).toHaveText('Black to move')
+  await expect(moves(page)).toHaveCount(1)
+  await page.waitForTimeout(1000)
+  await expect(moves(page)).toHaveCount(1)
+  await square(page, 'e7').click()
+  await square(page, 'e5').click()
+  await expect(moves(page)).toHaveText(['e4', 'e5'])
+  await expect(page.locator('.turn-status')).toHaveText('White to move')
+  expect((await savedPosition(page)).history()).toEqual(['e4', 'e5'])
+  await page.getByRole('button', { name: 'Take back', exact: true }).click()
+  expect((await savedPosition(page)).history()).toEqual(['e4'])
+  await expect(page.locator('.you-bar')).toContainText('Playing as white')
+})
+
+test('a new visitor sees friend play first', async ({ page }) => {
+  await page.evaluate(() => localStorage.clear())
+  await page.reload()
+  await expect(board(page)).toBeVisible()
+  await expect(page.locator('.opponent-bar')).toContainText('Same device')
+  await expect(page.locator('.turn-status')).toHaveText('White to move')
+  await expect(page.locator('.friend-actions .primary-button')).toHaveText('Play a friend')
+  const navigation = page.locator('#main-navigation .nav-item')
+  await expect(navigation.first()).toHaveText('Play a friend')
+  await page.locator('.friend-actions').getByRole('button', { name: 'Play a friend', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'A new game. All possibility.' })
+  await expect(dialog.getByRole('button', { name: 'Online friend', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  await expect(dialog.getByLabel('Your challenge')).toHaveCount(0)
+  await dialog.getByRole('button', { name: 'I have a code', exact: true }).click()
+  const join = page.getByRole('dialog', { name: 'Join a friend.' })
+  await join.getByLabel('Game code').fill('ABC')
+  await join.getByRole('button', { name: 'Join game', exact: true }).click()
+  await expect(join.getByRole('alert')).toHaveText('This code is not valid. Check it and try again.')
+})
+
+async function hostInvite(page: Page, color: 'White' | 'Black') {
+  await page.locator('.friend-actions').getByRole('button', { name: 'Play a friend', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'A new game. All possibility.' })
+  await dialog.getByRole('button', { name: color, exact: true }).click()
+  await dialog.getByLabel('Time control').selectOption('none')
+  await dialog.getByRole('button', { name: 'Create invite link', exact: true }).click()
+  const invite = page.getByRole('dialog', { name: 'Invite a friend.' })
+  await expect(invite.locator('.room-code')).toHaveText(/^[2-9A-HJKMNP-Z]{4}-[2-9A-HJKMNP-Z]{4}$/)
+  const link = await invite.getByLabel('Invite link').inputValue()
+  expect(link).toMatch(/#play\/[2-9A-HJKMNP-Z]{8}$/)
+  expect(link.length).toBeLessThan(120)
+  return { invite, link, code: await invite.locator('.room-code').innerText() }
+}
+
+async function expectConnected(white: Page, black: Page) {
+  for (const player of [white, black]) {
+    await expect(player.getByRole('dialog')).toBeHidden({ timeout: 40_000 })
+    await expect(player.locator('.opponent-bar')).toContainText('Online')
+  }
+  await expect(white.locator('.you-bar')).toContainText('Playing as white')
+  await expect(black.locator('.you-bar')).toContainText('Playing as black')
+  await expect(white.locator('.turn-status')).toHaveText('Your move')
+  await expect(black.locator('.turn-status')).toHaveText('Your friend has the next move.')
+  await square(white, 'e2').click()
+  await square(white, 'e4').click()
+  await expect(black.locator('.turn-status')).toHaveText('Your move')
+  await expect(square(black, 'e4')).toHaveAccessibleName('e4, white pawn')
+  await square(black, 'e7').click()
+  await square(black, 'e5').click()
+  await expect(white.locator('.turn-status')).toHaveText('Your move')
+  await expect(square(white, 'e5')).toHaveAccessibleName('e5, black pawn')
+  await expect(moves(white)).toHaveText(['e4', 'e5'])
+  await expect(moves(black)).toHaveText(['e4', 'e5'])
+  await expect(white).not.toHaveURL(/#play\//)
+  await expect(black).not.toHaveURL(/#play\//)
+}
+
+test.describe('online friends', () => {
+  test.skip(({ isMobile }) => isMobile, 'Desktop covers the online link.')
+  test.describe.configure({ timeout: 90_000 })
+
+  test('a friend joins from a short invite link with no reply', async ({ page, browser, baseURL }) => {
+    const { link } = await hostInvite(page, 'White')
+    const guest = await browser.newPage({ baseURL })
+    await guest.goto(link)
+    await expect(guest.getByRole('dialog', { name: 'Joining your friend.' })).toBeVisible()
+    await expectConnected(page, guest)
+    await guest.close()
+  })
+
+  test('a friend joins by typing the short code', async ({ page, browser, baseURL }) => {
+    const { code } = await hostInvite(page, 'Black')
+    const guest = await browser.newPage({ baseURL })
+    await guest.goto('./')
+    await guest.getByRole('button', { name: 'Join', exact: true }).click()
+    const join = guest.getByRole('dialog', { name: 'Join a friend.' })
+    await join.getByLabel('Game code').fill(code.toLowerCase())
+    await join.getByRole('button', { name: 'Join game', exact: true }).click()
+    await expectConnected(guest, page)
+    await guest.close()
+  })
+
+  test('the manual code still connects two friends', async ({ page, browser, baseURL }) => {
+    const { invite } = await hostInvite(page, 'White')
+    await invite.getByRole('button', { name: 'Use a manual code instead', exact: true }).click()
+    const manual = page.getByRole('dialog', { name: 'Share this link.' })
+    const longLink = manual.getByLabel('Invite link')
+    await expect(longLink).toHaveValue(/#join\/cc1/, { timeout: 15_000 })
+    const guest = await browser.newPage({ baseURL })
+    await guest.goto(await longLink.inputValue())
+    const reply = guest.getByRole('dialog', { name: 'Send this reply.' }).getByLabel('Reply code')
+    await expect(reply).toHaveValue(/^cc1/, { timeout: 15_000 })
+    await manual.getByLabel('Friend reply').fill(await reply.inputValue())
+    await manual.getByRole('button', { name: 'Connect', exact: true }).click()
+    await expectConnected(page, guest)
+    await guest.close()
   })
 })

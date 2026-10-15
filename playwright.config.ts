@@ -16,6 +16,9 @@ export default defineConfig({
     storageState: { cookies: [], origins: [] },
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
+    launchOptions: {
+      args: ['--disable-features=WebRtcHideLocalIpsWithMdns'],
+    },
   },
   projects: [
     {
