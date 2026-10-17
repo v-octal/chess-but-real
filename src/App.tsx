@@ -30,12 +30,12 @@ const SAVE_KEY = 'chess-club-game-v1'
 const ARCHIVE_KEY = 'chess-club-archive-v1'
 type EndReason = 'resigned' | 'timeout-w' | 'timeout-b' | 'capture-w' | 'capture-b' | null
 type ModalType = 'new' | 'resign' | 'result' | 'learn' | 'archive' | 'preferences' | 'join' | 'link' | null
-type Settings = { sound: boolean; hints: boolean; coordinates: boolean; theme: 'sage' | 'walnut' | 'slate' }
+type Settings = { sound: boolean; hints: boolean; coordinates: boolean; theme: 'mono' | 'sage' | 'walnut' | 'slate' }
 type GameRecord = { startFen: string; moves: string[]; headers: Record<string, string>; comments: { fen: string; comment: string }[] }
 type SavedGame = { pgn: string; playerColor: Color; level: number; seconds: Record<Color, number>; timed: boolean; endReason: EndReason; id: string; settings: Settings; mode?: PlayMode; resignColor?: Color | null; captures?: CaptureAttempt[]; record?: GameRecord }
 type ArchivedGame = { id: string; pgn: string; title: string; date: string; moves: number; color: Color; level: number; mode?: PlayMode }
 type PendingGame = { mode: PlayMode; color: Color; level: number; timed: boolean; id: string }
-const DEFAULT_SETTINGS: Settings = { sound: true, hints: true, coordinates: true, theme: 'sage' }
+const DEFAULT_SETTINGS: Settings = { sound: true, hints: true, coordinates: true, theme: 'mono' }
 
 function restoreSavedGame(data: Partial<SavedGame>) {
   if (!data.record) {
@@ -220,6 +220,13 @@ function App() {
   const infoModal = modal === 'archive' || modal === 'learn' || modal === 'preferences'
 
   useEffect(() => { soundRef.current = settings.sound }, [settings.sound])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = settings.theme
+    const meta = document.querySelector('meta[name="theme-color"]')
+    const header = getComputedStyle(document.documentElement).getPropertyValue('--header-bg').trim()
+    if (meta && header) meta.setAttribute('content', header)
+  }, [settings.theme])
 
   useEffect(() => {
     if (!captureEffect) return
@@ -608,7 +615,7 @@ function App() {
     const url = URL.createObjectURL(new Blob([pgn], { type: 'application/x-chess-pgn' }))
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `chess-club-${id.slice(0, 8)}.pgn`
+    anchor.download = `chess-but-real-${id.slice(0, 8)}.pgn`
     anchor.click()
     URL.revokeObjectURL(url)
     setToast('Your game is saved as a PGN file.')
@@ -644,7 +651,7 @@ function App() {
         ['coordinates', 'Board coordinates', 'Keep the ranks and files in view.'],
         ['sound', 'Move sounds', 'A little sound with every move.'],
       ] as const).map(([key, title, description]) => <div className="setting-row" key={key}><div><strong>{title}</strong><small>{description}</small></div><button type="button" className={`toggle ${settings[key] ? 'is-on' : ''}`} role="switch" aria-checked={settings[key]} aria-label={title} onClick={() => updateSetting(key, !settings[key])}><span /></button></div>)}
-      <div className="theme-setting"><strong>Board color</strong><div className="theme-options">{(['sage', 'walnut', 'slate'] as const).map(theme => <button key={theme} className={`theme-option ${theme} ${settings.theme === theme ? 'chosen' : ''}`} onClick={() => updateSetting('theme', theme)} aria-label={`${theme} board`} aria-pressed={settings.theme === theme}><span className="theme-swatch">{settings.theme === theme && <Check size={16} />}</span><span>{theme}</span></button>)}</div></div>
+      <div className="theme-setting"><strong>Color theme</strong><div className="theme-options">{(['mono', 'sage', 'walnut', 'slate'] as const).map(theme => <button key={theme} className={`theme-option ${theme} ${settings.theme === theme ? 'chosen' : ''}`} onClick={() => updateSetting('theme', theme)} aria-label={`${theme} theme`} aria-pressed={settings.theme === theme}><span className="theme-swatch">{settings.theme === theme && <Check size={16} />}</span><span>{theme}</span></button>)}</div></div>
       <div className="local-note"><ShieldCheck size={16} /><span>Your preferences stay on this device.</span></div>
     </div>
   }
@@ -707,9 +714,9 @@ function App() {
 
   return <div className="app-shell">
     <header className="app-header">
-      <button className="brand" onClick={() => { setModal(null); setMobileMenu(false) }} aria-label="Chess Club home">
+      <button className="brand" onClick={() => { setModal(null); setMobileMenu(false) }} aria-label="Chess but real home">
         <span className="brand-mark"><ChessPiece type="n" color="w" /></span>
-        <span>chess<span className="brand-light">club</span><span className="brand-period">.</span></span>
+        <span>Chess<span className="brand-light"> but real</span><span className="brand-period">.</span></span>
       </button>
       <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileMenu} aria-controls="main-navigation" onClick={() => setMobileMenu(true)}><Menu size={22} /></button>
       {mobileMenu && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setMobileMenu(false)} />}
@@ -728,7 +735,7 @@ function App() {
       <div className="game-layout">
         <section className="board-section" aria-label="Chess game">
           {playerBar(true)}
-          <div className={`board-frame theme-${settings.theme} ${!settings.coordinates ? 'no-coordinates' : ''}`}>
+          <div className={`board-frame ${!settings.coordinates ? 'no-coordinates' : ''}`}>
             <div className="rank-labels" aria-hidden="true">{rows.map(rank => <span key={rank}>{rank}</span>)}</div>
             <div className="chessboard" role="group" aria-label={`Chess board. ${game.turn() === 'w' ? 'White' : 'Black'} to move`}>
               {rows.flatMap(rank => files.map(file => {

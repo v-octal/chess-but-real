@@ -325,11 +325,11 @@ test('resignation requires confirmation and archives one persistent game', async
   const downloadEvent = page.waitForEvent('download')
   await archiveDialog.getByRole('button', { name: 'Download saved game', exact: true }).click()
   const download = await downloadEvent
-  expect(download.suggestedFilename()).toBe(`chess-club-${id.slice(0, 8)}.pgn`)
+  expect(download.suggestedFilename()).toBe(`chess-but-real-${id.slice(0, 8)}.pgn`)
   expect(await download.failure()).toBeNull()
 })
 
-test('settings control hints, coordinates, sound, and all board themes', async ({ page }) => {
+test('settings control hints, coordinates, sound, and all app themes', async ({ page }) => {
   await square(page, 'e2').click()
   await expect(board(page).locator('.legal-dot')).toHaveCount(2)
   await page.getByRole('tab', { name: 'Settings', exact: true }).click()
@@ -345,19 +345,23 @@ test('settings control hints, coordinates, sound, and all board themes', async (
   await expect(page.locator('.file-labels')).toBeHidden()
   await expect(page.getByRole('button', { name: 'Enable sound', exact: true })).toBeVisible()
   const colors = new Set<string>()
+  const shellColors = new Set<string>()
   for (const theme of ['walnut', 'sage', 'slate'] as const) {
-    const option = settings.getByRole('button', { name: `${theme} board`, exact: true })
+    const option = settings.getByRole('button', { name: `${theme} theme`, exact: true })
     await option.click()
     await expect(option).toHaveAttribute('aria-pressed', 'true')
     await expect(settings.locator('.theme-option[aria-pressed="true"]')).toHaveCount(1)
-    await expect(page.locator('.board-frame')).toHaveClass(new RegExp(`theme-${theme}`))
+    await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe(theme)
     const expectedColors = { walnut: 'rgb(231, 212, 179)', sage: 'rgb(230, 233, 212)', slate: 'rgb(220, 228, 231)' }
     await expect(square(page, 'e4')).toHaveCSS('background-color', expectedColors[theme])
     colors.add(await square(page, 'e4').evaluate(element => getComputedStyle(element).backgroundColor))
+    shellColors.add(await page.locator('.app-header').evaluate(element => getComputedStyle(element).backgroundColor))
+    shellColors.add(await page.locator('.game-panel').evaluate(element => getComputedStyle(element).backgroundColor))
   }
   expect(colors.size).toBe(3)
+  expect(shellColors.size).toBe(6)
   await page.reload()
-  await expect(page.locator('.board-frame')).toHaveClass(/theme-slate/)
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe('slate')
   await expect(page.locator('.rank-labels')).toBeHidden()
   await square(page, 'e2').click()
   await expect(board(page).locator('.legal-dot')).toHaveCount(0)
