@@ -1,11 +1,27 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Chess } from 'chess.js'
 import { resolveMove } from './capture'
-import { decodeSignal, encodeSignal, extractCode, parseMessage } from './pvp'
+import { decodeSignal, encodeSignal, extractCode, inviteLink, parseMessage } from './pvp'
 
 const sdp = 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\nc=IN IP4 0.0.0.0\r\na=setup:actpass\r\na=mid:0\r\na=sctp-port:5000\r\n'
 
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
+
 describe('friend link codes', () => {
+  it.each(['/', '/chess-but-real/', '/games/chess-royale/'])('preserves the deployment path %s in an invite link', async path => {
+    const href = `https://player.github.io${path}?theme=sage#play/OLDROOM`
+    vi.stubGlobal('location', new URL(href))
+    const signal = { v: 1, t: 'o', s: sdp, c: 'w', m: 0, g: 'game-pages' } as const
+    const code = await encodeSignal(signal)
+    const link = inviteLink(code)
+    expect(link).toBe(`https://player.github.io${path}?theme=sage#join/${code}`)
+    expect(extractCode(link)).toBe(code)
+    expect(await decodeSignal(link)).toEqual(signal)
+    expect(location.href).toBe(href)
+  })
+
   it('keeps an invite and a reply intact', async () => {
     const invite = await encodeSignal({ v: 1, t: 'o', s: sdp, c: 'b', m: 0, g: 'game-1' })
     const reply = await encodeSignal({ v: 1, t: 'a', s: sdp, g: 'game-1' })

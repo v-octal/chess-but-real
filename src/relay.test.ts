@@ -1,7 +1,21 @@
-import { describe, expect, it } from 'vitest'
-import { formatRoomCode, makeRoomCode, normalizeRoomCode } from './relay'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { formatRoomCode, makeRoomCode, normalizeRoomCode, playLink } from './relay'
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 describe('short friend codes', () => {
+  it.each(['/', '/chess-but-real/', '/games/chess-royale/'])('preserves the deployment path %s in a play link', path => {
+    const href = `https://player.github.io${path}?theme=sage#join/old-invite`
+    vi.stubGlobal('location', new URL(href))
+    const code = 'K7QXM2P4'
+    const link = playLink(code)
+    expect(link).toBe(`https://player.github.io${path}?theme=sage#play/${code}`)
+    expect(normalizeRoomCode(link)).toBe(code)
+    expect(location.href).toBe(href)
+  })
+
   it('makes a readable eight-character code', () => {
     const code = makeRoomCode()
     expect(code).toMatch(/^[2-9A-HJKMNP-Z]{8}$/)

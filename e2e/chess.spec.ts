@@ -3,6 +3,7 @@ import type { Locator, Page } from '@playwright/test'
 import type { Color, Square } from 'chess.js'
 import { applyBattleAction, createBattle, SUPPORT_BONUS, UNIT_STATS } from '../src/battle'
 import type { BattleState } from '../src/battle'
+import type { BattleResponse } from '../src/battle.worker'
 
 const SAVE_KEY = 'chess-but-real-health-v2'
 const ARCHIVE_KEY = 'chess-but-real-health-archive-v2'
@@ -17,6 +18,8 @@ type SavedBattle = {
   level: number
   settings: { sound: boolean; hints: boolean; theme: 'mono' | 'sage' | 'walnut' | 'slate' }
 }
+
+type WorkerProbe = { responses: BattleResponse[]; errors: string[] }
 
 const board = (page: Page) => page.getByRole('group', { name: /^Chess board\./ })
 const square = (page: Page, name: Square) => board(page).locator(`[data-square="${name}"]`)
@@ -103,6 +106,56 @@ async function expectNoCards(page: Page) {
 
 test.beforeEach(async ({ page }) => {
   await seedBattle(page)
+})
+
+test('Chess Royale loads assets, moves, and exports from its deployment path @pages', async ({ page, baseURL, request }) => {
+  const base = new URL(baseURL!)
+  await expect(page).toHaveURL(base.href)
+  await expect(page).toHaveTitle('Chess Royale — Every hit counts.')
+  const brand = page.getByRole('button', { name: 'Chess Royale home', exact: true })
+  await expect(brand).toBeVisible()
+  await expect(brand).toHaveText('Chess Royale')
+  await brand.click()
+  const dialog = page.getByRole('dialog', { name: 'A new kind of chess.' })
+  await expect(dialog).toBeVisible()
+  await expect(dialog.locator('.eyebrow')).toHaveText('CHESS ROYALE · HEALTH EDITION')
+  await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
+
+  const scripts = await page.locator('script[type="module"][src]').evaluateAll(items => items.map(item => (item as HTMLScriptElement).src))
+  const styles = await page.locator('link[rel="stylesheet"]').evaluateAll(items => items.map(item => (item as HTMLLinkElement).href).filter(href => new URL(href).origin === location.origin))
+  const icon = page.locator('link[rel="icon"]')
+  await expect(icon).toHaveCount(1)
+  const favicon = await icon.evaluate(item => (item as HTMLLinkElement).href)
+  expect(scripts.length).toBeGreaterThan(0)
+  const assets = [
+    ...scripts.map(url => ({ url, contentType: /(?:java|ecma)script/i })),
+    ...styles.map(url => ({ url, contentType: /text\/css/i })),
+    { url: favicon, contentType: /image\/svg\+xml/i },
+  ]
+  for (const { url, contentType } of assets) {
+    expect(new URL(url).origin).toBe(base.origin)
+    expect(new URL(url).pathname.startsWith(base.pathname)).toBe(true)
+    const response = await request.get(url)
+    expect(response.ok(), url).toBe(true)
+    expect(response.headers()['content-type'], url).toMatch(contentType)
+  }
+
+  const initial = await liveState(page)
+  const moved = await act(page, 'e2', 'e4')
+  expect(moved).toEqual(applyBattleAction(initial, { from: 'e2', to: 'e4' }))
+  await expectPosition(page, moved)
+  await expect(turn(page)).toHaveText('Black to act.')
+  const saved = await savedBattle(page)
+  const downloadStarted = page.waitForEvent('download')
+  await page.getByRole('button', { name: 'Export battle', exact: true }).click()
+  const download = await downloadStarted
+  expect(download.suggestedFilename()).toBe(`chess-royale-${saved.session.id.slice(0, 8)}.json`)
+  expect(await download.failure()).toBeNull()
+  const stream = await download.createReadStream()
+  expect(stream).not.toBeNull()
+  const chunks: Buffer[] = []
+  for await (const chunk of stream!) chunks.push(chunk)
+  expect(JSON.parse(Buffer.concat(chunks).toString())).toEqual(saved)
 })
 
 test('the initial board has 32 health bars and no command or tactic controls', async ({ page }) => {
@@ -425,20 +478,43 @@ test('the black perspective and board flip preserve health and square controls',
   await expect(board(page).locator('[data-square]').first()).toHaveAttribute('data-square', 'h1')
 })
 
-test('the computer worker returns one legal action without cards', async ({ page }) => {
+test('the computer worker returns one legal action without fallback or cards @pages', async ({ page, baseURL }) => {
   await seedBattle(page, createBattle(), { mode: 'computer', level: 1 })
+  await page.evaluate(() => {
+    const probe: WorkerProbe = { responses: [], errors: [] }
+    Object.assign(window, { workerProbe: probe })
+    const NativeWorker = window.Worker
+    window.Worker = class extends NativeWorker {
+      constructor(url: string | URL, options?: WorkerOptions) {
+        super(url, options)
+        this.addEventListener('message', (event: MessageEvent<BattleResponse>) => probe.responses.push(event.data))
+        this.addEventListener('error', event => probe.errors.push(event.message || 'Worker load failed'))
+        this.addEventListener('messageerror', () => probe.errors.push('Worker response failed'))
+      }
+    }
+  })
   const workerStarted = page.waitForEvent('worker', { predicate: worker => worker.url().includes('battle.worker') })
   await square(page, 'e2').click()
   await square(page, 'e4').click()
   const worker = await workerStarted
-  expect(worker.url()).toContain('battle.worker')
+  const workerURL = new URL(worker.url())
+  const base = new URL(baseURL!)
+  expect(workerURL.origin).toBe(base.origin)
+  expect(workerURL.pathname.startsWith(base.pathname)).toBe(true)
+  await expect.poll(() => page.evaluate(() => (window as typeof window & { workerProbe: WorkerProbe }).workerProbe.responses.length)).toBe(1)
   await expect.poll(async () => (await savedBattle(page)).session.states.length).toBe(3)
   await settled(page)
   await expect(turn(page)).toHaveText('Your turn. Move or attack.')
+  const probe = await page.evaluate(() => (window as typeof window & { workerProbe: WorkerProbe }).workerProbe)
+  expect(probe.errors).toEqual([])
+  expect(probe.responses).toHaveLength(1)
+  const response = probe.responses[0]
+  expect(response.requestId).toBe(1)
+  expect(response.move).not.toBeNull()
   const saved = await savedBattle(page)
   const [initial, human, computer] = saved.session.states
   expect(applyBattleAction(initial, { from: 'e2', to: 'e4' })).toEqual(human)
-  expect(computer.lastAction).toMatchObject({ color: 'b', ply: 2 })
+  expect(computer.lastAction).toMatchObject({ color: 'b', ply: 2, ...response.move! })
   const reply = computer.lastAction!
   expect(applyBattleAction(human, { from: reply.from, to: reply.to, ...(reply.promotion ? { promotion: reply.promotion } : {}) })).toEqual(computer)
   await expectPosition(page, computer)

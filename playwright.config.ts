@@ -1,5 +1,8 @@
 import { defineConfig } from '@playwright/test'
 
+const previewUrl = process.env.PLAYWRIGHT_PREVIEW_URL
+const preview = previewUrl ? new URL(previewUrl) : null
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -10,8 +13,13 @@ export default defineConfig({
   expect: { timeout: 15_000 },
   reporter: 'list',
   outputDir: 'test-results',
+  webServer: preview ? {
+    command: `npm run preview -- --port ${preview.port || '4173'} --strictPort --base ${preview.pathname}`,
+    url: preview.href,
+    reuseExistingServer: false,
+  } : undefined,
   use: {
-    baseURL: process.env.ARENA_PREVIEW_URL || `http://127.0.0.1:${process.env.PASEO_PORT || process.env.PORT || '5173'}`,
+    baseURL: previewUrl || process.env.ARENA_PREVIEW_URL || `http://127.0.0.1:${process.env.PASEO_PORT || process.env.PORT || '5173'}`,
     browserName: 'chromium',
     storageState: { cookies: [], origins: [] },
     trace: 'retain-on-failure',
