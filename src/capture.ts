@@ -8,6 +8,25 @@ export type CaptureOdds = {
   defenders: number
 }
 
+/** Tactical card marks that change the odds of one capture. */
+export type OddsContext = {
+  guarded?: boolean
+  exposed?: boolean
+  assault?: boolean
+}
+
+export type AdjustedOdds = CaptureOdds & {
+  guardPenalty: number
+  exposeBonus: number
+  assaultBonus: number
+}
+
+export const GUARD_PENALTY = 30
+export const EXPOSE_BONUS = 30
+export const ASSAULT_BONUS = 25
+export const MAX_ADJUSTED_CHANCE = 99
+export const MIN_ADJUSTED_CHANCE = 10
+
 export type CaptureAttempt = CaptureOdds & {
   ply: number
   from: Square
@@ -17,6 +36,9 @@ export type CaptureAttempt = CaptureOdds & {
   color: Color
   roll: number
   success: boolean
+  guardPenalty?: number
+  exposeBonus?: number
+  assaultBonus?: number
 }
 
 const strengths: Record<PieceSymbol, number> = {
@@ -50,6 +72,30 @@ export function getCaptureOdds(game: Chess, move: Move): CaptureOdds | null {
   }
 }
 
+export function victimSquare(move: Move): Square {
+  return move.isEnPassant() ? (`${move.to[0]}${move.from[1]}` as Square) : move.to
+}
+
+export function adjustOdds(odds: CaptureOdds, context?: OddsContext): AdjustedOdds {
+  const guardPenalty = context?.guarded ? -GUARD_PENALTY : 0
+  const exposeBonus = context?.exposed ? EXPOSE_BONUS : 0
+  const assaultBonus = context?.assault ? ASSAULT_BONUS : 0
+  const total = guardPenalty + exposeBonus + assaultBonus
+  if (!total) return { ...odds, guardPenalty: 0, exposeBonus: 0, assaultBonus: 0 }
+  return {
+    ...odds,
+    chance: clamp(odds.chance + total, MIN_ADJUSTED_CHANCE, MAX_ADJUSTED_CHANCE),
+    guardPenalty,
+    exposeBonus,
+    assaultBonus,
+  }
+}
+
+export function getAdjustedCaptureOdds(game: Chess, move: Move, context?: OddsContext): AdjustedOdds | null {
+  const odds = getCaptureOdds(game, move)
+  return odds ? adjustOdds(odds, context) : null
+}
+
 export function isCaptureRepetition(game: Chess): boolean {
   const history = game.history({ verbose: true })
   const current = game.fen().split(' ').slice(0, 4).join(' ')
@@ -74,6 +120,7 @@ export function resolveMove(
   game: Chess,
   input: { from: string; to: string; promotion?: string },
   roll?: number,
+  context?: OddsContext,
 ): { move: Move | null; capture: CaptureAttempt | null; defeated: Color | null } {
   if (isCaptureGameOver(game)) throw new Error('Game is over')
 
@@ -85,8 +132,10 @@ export function resolveMove(
     throw new RangeError('Roll must be finite and within [0, 1)')
   }
 
-  const odds = getCaptureOdds(game, move)
-  if (!odds || !move.captured) return { move: game.move(move), capture: null, defeated: null }
+  const base = getCaptureOdds(game, move)
+  if (!base || !move.captured) return { move: game.move(move), capture: null, defeated: null }
+  const marked = Boolean(context?.guarded || context?.exposed || context?.assault)
+  const odds: CaptureOdds = marked ? adjustOdds(base, context) : base
 
   const captureRoll = roll ?? crypto.getRandomValues(new Uint32Array(1))[0] / 2 ** 32
   const capture: CaptureAttempt = {

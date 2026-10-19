@@ -44,6 +44,83 @@ describe('friend messages', () => {
   })
 })
 
+describe('deterministic battle messages', () => {
+  const start = { type: 'battle-start', version: 2, gameId: 'game-1', hostColor: 'w' } as const
+  const action = { type: 'battle-action', version: 2, gameId: 'game-1', ply: 0, from: 'e2', to: 'e4', before: JSON.stringify({ ply: 0 }) } as const
+  const resign = { type: 'battle-resign', version: 2, gameId: 'game-1', ply: 1, color: 'b' } as const
+  const messages = [start, action, resign]
+
+  it.each(messages)('accepts $type', message => {
+    expect(parseMessage(JSON.stringify(message))).toStrictEqual(message)
+  })
+
+  it.each(messages)('rejects invalid versions for $type', message => {
+    for (const version of [undefined, null, 1, 3, '2', true]) {
+      expect(parseMessage(JSON.stringify({ ...message, version }))).toBeNull()
+    }
+  })
+
+  it.each(messages)('checks game ID limits for $type', message => {
+    for (const gameId of ['g', 'g'.repeat(128)]) {
+      expect(parseMessage(JSON.stringify({ ...message, gameId }))).toStrictEqual({ ...message, gameId })
+    }
+    for (const gameId of [undefined, null, '', 'g'.repeat(129), 1, true, {}]) {
+      expect(parseMessage(JSON.stringify({ ...message, gameId }))).toBeNull()
+    }
+  })
+
+  it.each(messages)('does not pass peer state in $type', message => {
+    expect(parseMessage(JSON.stringify({ ...message, state: { ply: 99 }, fen: 'peer position', roll: 0.5 }))).toStrictEqual(message)
+  })
+
+  it.each([action, resign])('checks safe nonnegative ply for $type', message => {
+    for (const ply of [0, 1, Number.MAX_SAFE_INTEGER]) {
+      expect(parseMessage(JSON.stringify({ ...message, ply }))).toStrictEqual({ ...message, ply })
+    }
+    for (const ply of [undefined, null, -1, 0.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, '0', true]) {
+      expect(parseMessage(JSON.stringify({ ...message, ply }))).toBeNull()
+    }
+  })
+
+  it.each(['w', 'b'])('accepts battle colors %s', color => {
+    expect(parseMessage(JSON.stringify({ ...start, hostColor: color }))).toStrictEqual({ ...start, hostColor: color })
+    expect(parseMessage(JSON.stringify({ ...resign, color }))).toStrictEqual({ ...resign, color })
+  })
+
+  it.each([undefined, null, '', 'white', 'W', 1, true])('rejects invalid battle colors %s', color => {
+    expect(parseMessage(JSON.stringify({ ...start, hostColor: color }))).toBeNull()
+    expect(parseMessage(JSON.stringify({ ...resign, color }))).toBeNull()
+  })
+
+  it.each(['from', 'to'])('checks the action square %s', field => {
+    for (const square of ['a1', 'h8']) {
+      expect(parseMessage(JSON.stringify({ ...action, [field]: square }))).toStrictEqual({ ...action, [field]: square })
+    }
+    for (const square of [undefined, null, '', 'e9', 'i2', 'E2', 'e2e4', 2, true]) {
+      expect(parseMessage(JSON.stringify({ ...action, [field]: square }))).toBeNull()
+    }
+  })
+
+  it('checks optional action promotions', () => {
+    for (const promotion of ['q', 'r', 'b', 'n']) {
+      const message = { ...action, from: 'a7', to: 'a8', promotion }
+      expect(parseMessage(JSON.stringify(message))).toStrictEqual(message)
+    }
+    for (const promotion of [null, '', 'p', 'k', 'Q', 1, true]) {
+      expect(parseMessage(JSON.stringify({ ...action, promotion }))).toBeNull()
+    }
+  })
+
+  it('accepts a bounded state key without a peer state', () => {
+    for (const before of ['', action.before, 'x'.repeat(29999)]) {
+      expect(parseMessage(JSON.stringify({ ...action, before }))).toStrictEqual({ ...action, before })
+    }
+    for (const before of [undefined, null, 1, true, {}, [], 'x'.repeat(30000)]) {
+      expect(parseMessage(JSON.stringify({ ...action, before }))).toBeNull()
+    }
+  })
+})
+
 describe('shared capture outcomes', () => {
   it.each([0, 0.999999])('keeps both players in the same position with roll %s', roll => {
     const sender = new Chess('7k/8/8/4p3/3P4/8/8/K7 w - - 0 1')

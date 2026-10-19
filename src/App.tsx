@@ -1,837 +1,550 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
-import { Chess } from 'chess.js'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import type { Color, PieceSymbol, Square } from 'chess.js'
-import {
-  ArrowDownToLine, ArrowLeft, ArrowRight, BookOpen,
-  Check, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
-  Clock3, Copy, Flag, History, Lightbulb, Menu,
-  Plus, RotateCcw, Settings2, Share2, ShieldCheck, Sparkles,
-  Swords, Users, Volume2, VolumeX, X,
-} from 'lucide-react'
+import { ArrowDownToLine, ArrowLeft, ArrowRight, BookOpen, Check, ChevronLeft, ChevronRight, Copy, Crosshair, Flag, Heart, History, MoveUpRight, Plus, RotateCcw, Settings2, Shield, Swords, Target, Users, Volume2, VolumeX, X } from 'lucide-react'
 import { ChessPiece } from './ChessPiece'
-import { getCaptureOdds, isCaptureGameOver, isCaptureRepetition, resolveMove } from './capture'
-import type { CaptureAttempt } from './capture'
-import type { EngineResponse } from './engine.worker'
-import type { ComputerMove } from './engine'
-import { acceptAnswer, createAnswer, createOffer, extractCode, inviteLink } from './pvp'
-import type { FriendLink, LinkPhase, PlayMode, PvpLink, PvpMessage } from './pvp'
+import { WeaponFx } from './WeaponFx'
+import { SUPPORT_BONUS, UNIT_STATS, applyBattleAction, battleActions, battleOutcome, createBattle, healthTotal, validateBattle } from './battle'
+import type { BattleAction, BattlePiece, BattleState } from './battle'
+import { acceptAnswer, createAnswer, createOffer, inviteLink } from './pvp'
+import type { FriendLink, LinkPhase, PvpLink, PvpMessage } from './pvp'
 import { RelayLink, formatRoomCode, makeRoomCode, normalizeRoomCode, playLink } from './relay'
 
-const LEVELS = [
-  { name: 'Beginner', caption: 'A friendly place to start.', rating: '600' },
-  { name: 'Casual', caption: 'Find your rhythm.', rating: '1000' },
-  { name: 'Intermediate', caption: 'A balanced challenge.', rating: '1400' },
-  { name: 'Advanced', caption: 'Make every move count.', rating: '1800' },
-]
-const NAMES: Record<PieceSymbol, string> = { p: 'Pawn', n: 'Knight', b: 'Bishop', r: 'Rook', q: 'Queen', k: 'King' }
-const START_TIME = 600
-const SAVE_KEY = 'chess-club-game-v1'
-const ARCHIVE_KEY = 'chess-club-archive-v1'
-type EndReason = 'resigned' | 'timeout-w' | 'timeout-b' | 'capture-w' | 'capture-b' | null
-type ModalType = 'new' | 'resign' | 'result' | 'learn' | 'archive' | 'preferences' | 'join' | 'link' | null
-type Settings = { sound: boolean; hints: boolean; coordinates: boolean; theme: 'mono' | 'sage' | 'walnut' | 'slate' }
-type GameRecord = { startFen: string; moves: string[]; headers: Record<string, string>; comments: { fen: string; comment: string }[] }
-type SavedGame = { pgn: string; playerColor: Color; level: number; seconds: Record<Color, number>; timed: boolean; endReason: EndReason; id: string; settings: Settings; mode?: PlayMode; resignColor?: Color | null; captures?: CaptureAttempt[]; record?: GameRecord }
-type ArchivedGame = { id: string; pgn: string; title: string; date: string; moves: number; color: Color; level: number; mode?: PlayMode }
-type PendingGame = { mode: PlayMode; color: Color; level: number; timed: boolean; id: string }
-const DEFAULT_SETTINGS: Settings = { sound: true, hints: true, coordinates: true, theme: 'mono' }
+type Mode = 'computer' | 'local' | 'online'
+type Settings = { sound: boolean; hints: boolean; theme: 'mono' | 'sage' | 'walnut' | 'slate' }
+type Session = { id: string; states: BattleState[]; resigned: Color | null }
+type SavedBattle = { version: 2; session: Session; mode: Mode; playerColor: Color; level: number; settings: Settings }
+type Animation = { id: number; action: BattleAction; before: BattleState; after: BattleState; stage: 'launch' | 'impact' | 'travel' }
+type Modal = 'new' | 'rules' | 'settings' | 'resign' | 'archive' | null
+const SAVE_KEY = 'chess-but-real-health-v2'
+const ARCHIVE_KEY = 'chess-but-real-health-archive-v2'
+const DEFAULT_SETTINGS: Settings = { sound: true, hints: true, theme: 'mono' }
+const LEVELS = ['Beginner', 'Casual', 'Intermediate', 'Advanced']
+const TYPES: PieceSymbol[] = ['p', 'n', 'b', 'r', 'q', 'k']
+const other = (color: Color): Color => color === 'w' ? 'b' : 'w'
+const side = (color: Color) => color === 'w' ? 'White' : 'Black'
+const newSession = (): Session => ({ id: crypto.randomUUID(), states: [createBattle()], resigned: null })
+const latest = (session: Session) => session.states[session.states.length - 1]
+const stateKey = (state: BattleState) => JSON.stringify(state)
 
-function restoreSavedGame(data: Partial<SavedGame>) {
-  if (!data.record) {
-    const game = new Chess()
-    if (data.pgn) game.loadPgn(data.pgn)
-    return game
-  }
-  const game = new Chess(data.record.startFen)
-  const comments = new Map(data.record.comments.map(entry => [entry.fen, entry.comment]))
-  const restoreComment = () => {
-    const comment = comments.get(game.fen())
-    if (comment) game.setComment(comment)
-  }
-  restoreComment()
-  data.record.moves.forEach(move => { game.move(move); restoreComment() })
-  Object.entries(data.record.headers).forEach(([key, value]) => game.setHeader(key, value))
-  return game
+function validSession(value: unknown): value is Session {
+  if (!value || typeof value !== 'object') return false
+  const session = value as Session
+  return typeof session.id === 'string' && session.id.length > 0 && Array.isArray(session.states)
+    && session.states.length > 0 && session.states.length <= 2000 && session.states.every(validateBattle)
+    && (session.resigned === null || session.resigned === 'w' || session.resigned === 'b')
 }
 
-function readSavedGame(): Partial<SavedGame> {
+function readSaved(): SavedBattle | null {
   try {
-    const data = JSON.parse(localStorage.getItem(SAVE_KEY) || '{}') as Partial<SavedGame>
-    restoreSavedGame(data)
-    return data
-  } catch { return {} }
+    const data = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null') as SavedBattle | null
+    if (!data || data.version !== 2 || !validSession(data.session)) return null
+    return {
+      ...data,
+      mode: data.mode === 'online' || data.mode === 'local' ? data.mode : 'computer',
+      playerColor: data.playerColor === 'b' ? 'b' : 'w',
+      level: Number.isInteger(data.level) && data.level >= 1 && data.level <= 4 ? data.level : 3,
+      settings: {
+        sound: typeof data.settings?.sound === 'boolean' ? data.settings.sound : true,
+        hints: typeof data.settings?.hints === 'boolean' ? data.settings.hints : true,
+        theme: ['sage', 'walnut', 'slate'].includes(data.settings?.theme) ? data.settings.theme : 'mono',
+      },
+    }
+  } catch { return null }
 }
 
-function readArchive(): ArchivedGame[] {
-  try { return JSON.parse(localStorage.getItem(ARCHIVE_KEY) || '[]') as ArchivedGame[] } catch { return [] }
+function readArchive(): Session[] {
+  try {
+    const data: unknown = JSON.parse(localStorage.getItem(ARCHIVE_KEY) || '[]')
+    return Array.isArray(data) ? data.filter(validSession).slice(0, 12) : []
+  } catch { return [] }
 }
 
-function playMoveSound(capture = false) {
+function sound(attack: boolean, lethal: boolean) {
   try {
     const context = new AudioContext()
     const oscillator = context.createOscillator()
     const gain = context.createGain()
-    oscillator.type = 'sine'
-    oscillator.frequency.setValueAtTime(capture ? 290 : 440, context.currentTime)
-    oscillator.frequency.exponentialRampToValueAtTime(140, context.currentTime + 0.075)
-    gain.gain.setValueAtTime(0.08, context.currentTime)
-    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.09)
+    oscillator.type = attack ? 'triangle' : 'sine'
+    oscillator.frequency.setValueAtTime(lethal ? 160 : attack ? 320 : 480, context.currentTime)
+    oscillator.frequency.exponentialRampToValueAtTime(90, context.currentTime + 0.15)
+    gain.gain.setValueAtTime(0.045, context.currentTime)
+    gain.gain.exponentialRampToValueAtTime(0.001, context.currentTime + 0.19)
     oscillator.connect(gain)
     gain.connect(context.destination)
     oscillator.start()
-    oscillator.stop(context.currentTime + 0.1)
+    oscillator.stop(context.currentTime + 0.2)
     oscillator.onended = () => { void context.close() }
   } catch { return }
 }
 
-function formatTime(value: number) {
-  return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`
+function describeAction(action: BattleAction) {
+  const name = UNIT_STATS[action.piece].name
+  if (action.kind === 'move') return `${name} ${action.from} → ${action.to}${action.rookFrom ? ' · castle' : ''}${action.promotion ? ` · ${UNIT_STATS[action.promotion].name}` : ''}`
+  return `${name} ${action.from} → ${action.to} · ${action.lethal ? 'capture' : 'attack'}`
 }
 
-function IconButton({ children, label, onClick, disabled = false, className = '' }: { children: ReactNode; label: string; onClick: () => void; disabled?: boolean; className?: string }) {
-  return <button type="button" className={`icon-button ${className}`} aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>
+function PieceHealth({ piece }: { piece: BattlePiece }) {
+  const ratio = piece.hp / UNIT_STATS[piece.type].health
+  return <><span className={`piece-health ${ratio <= 0.3 ? 'critical' : ''}`} aria-hidden="true"><span className="piece-health-fill" style={{ width: `${ratio * 100}%` }} /></span><span className="piece-hp" aria-hidden="true">{piece.hp}</span></>
 }
 
 function App() {
-  const [initial] = useState(readSavedGame)
-  const [game] = useState(() => restoreSavedGame(initial))
-  const [fen, setFen] = useState(game.fen())
-  const [gameId, setGameId] = useState(initial.id || crypto.randomUUID())
-  const [playerColor, setPlayerColor] = useState<Color>(initial.playerColor || 'w')
-  const [level, setLevel] = useState(initial.level || 3)
-  const [seconds, setSeconds] = useState<Record<Color, number>>(initial.seconds || { w: START_TIME, b: START_TIME })
-  const [timed, setTimed] = useState(initial.timed ?? true)
-  const [settings, setSettings] = useState<Settings>({ ...DEFAULT_SETTINGS, ...initial.settings })
-  const [endReason, setEndReason] = useState<EndReason>(initial.endReason || null)
-  const [captures, setCaptures] = useState<CaptureAttempt[]>(Array.isArray(initial.captures) ? initial.captures : [])
-  const [captureEffect, setCaptureEffect] = useState<CaptureAttempt | null>(null)
+  const [initial] = useState(readSaved)
+  const [session, setSession] = useState<Session>(() => initial?.session ?? newSession())
+  const [mode, setMode] = useState<Mode>(initial?.mode ?? 'computer')
+  const [playerColor, setPlayerColor] = useState<Color>(initial?.playerColor ?? 'w')
+  const [level, setLevel] = useState(initial?.level ?? 3)
+  const [settings, setSettings] = useState<Settings>(initial?.settings ?? DEFAULT_SETTINGS)
   const [selected, setSelected] = useState<Square | null>(null)
+  const [hovered, setHovered] = useState<Square | null>(null)
   const [flipped, setFlipped] = useState(false)
-  const [modal, setModal] = useState<ModalType>(null)
-  const [panelTab, setPanelTab] = useState<'game' | 'settings'>('game')
-  const [reviewPly, setReviewPly] = useState<number | null>(null)
-  const [promotion, setPromotion] = useState<{ from: Square; to: Square } | null>(null)
-  const [newColor, setNewColor] = useState<'w' | 'b' | 'random'>('w')
-  const [newLevel, setNewLevel] = useState(level)
-  const [newTimed, setNewTimed] = useState(timed)
-  const [newMode, setNewMode] = useState<PlayMode>('computer')
-  const [mode, setMode] = useState<PlayMode>(initial.mode === 'online' ? 'online' : 'computer')
-  const [resignColor, setResignColor] = useState<Color | null>(initial.resignColor || null)
-  const [linkPhase, setLinkPhase] = useState<LinkPhase | 'idle'>('idle')
-  const [linkBusy, setLinkBusy] = useState(false)
-  const [linkRole, setLinkRole] = useState<'host' | 'guest' | null>(null)
-  const [linkKind, setLinkKind] = useState<'relay' | 'manual' | null>(null)
-  const [roomCode, setRoomCode] = useState('')
-  const [inviteText, setInviteText] = useState('')
-  const [replyText, setReplyText] = useState('')
-  const [answerInput, setAnswerInput] = useState('')
-  const [joinInput, setJoinInput] = useState('')
-  const [linkError, setLinkError] = useState('')
-  const [mobileMenu, setMobileMenu] = useState(false)
-  const [toast, setToast] = useState('')
+  const [modal, setModal] = useState<Modal>(null)
+  const [newMode, setNewMode] = useState<Mode>('computer')
+  const [newColor, setNewColor] = useState<Color>('w')
+  const [review, setReview] = useState<number | null>(null)
+  const [animation, setAnimation] = useState<Animation | null>(null)
   const [archive, setArchive] = useState(readArchive)
-  const historyRef = useRef<HTMLDivElement>(null)
-  const modalRef = useRef<HTMLDivElement>(null)
-  const soundRef = useRef(settings.sound)
+  const [phase, setPhase] = useState<LinkPhase | 'idle'>('idle')
+  const [code, setCode] = useState('')
+  const [invite, setInvite] = useState('')
+  const [joinInput, setJoinInput] = useState('')
+  const [replyInput, setReplyInput] = useState('')
+  const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const [promotion, setPromotion] = useState<{ from: Square; to: Square } | null>(null)
+  const sessionRef = useRef(session)
+  const configRef = useRef({ mode, playerColor, settings })
+  const animationRef = useRef(false)
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([])
   const linkRef = useRef<FriendLink | null>(null)
+  const inbox = useRef<PvpMessage[]>([])
+  const receiveRef = useRef<(message: PvpMessage) => void>(() => {})
   const joinRef = useRef<(input: string) => void>(() => {})
-  const sessionRef = useRef(0)
-  const readyRef = useRef(false)
-  const inboxRef = useRef<PvpMessage[]>([])
-  const modeRef = useRef(mode)
-  const playerRef = useRef(playerColor)
-  const secondsRef = useRef(seconds)
-  const endRef = useRef(endReason)
-  endRef.current = endReason
-  modeRef.current = mode
-  playerRef.current = playerColor
-  secondsRef.current = seconds
-  const history = game.history({ verbose: true })
-  const finished = isCaptureGameOver(game) || endReason !== null
-  const computerColor: Color = playerColor === 'w' ? 'b' : 'w'
-  const isComputerTurn = mode === 'computer' && !linkBusy && game.turn() === computerColor && !finished
-  const isReversed = (playerColor === 'b') !== flipped
-  const isReview = reviewPly !== null
-  const plyCount = history.length + (endReason?.startsWith('capture') && captures.at(-1)?.ply === history.length + 1 ? 1 : 0)
-  const activePly = reviewPly ?? plyCount
-  const displayGame = isReview ? new Chess(history[0]?.before || game.fen()) : game
-  if (isReview) history.slice(0, activePly).forEach(move => displayGame.move(move.san))
-  const lastCapture = captures.find(capture => capture.ply === activePly)
-  const lastMove = lastCapture || history[activePly - 1]
-  const recentCapture = isReview ? lastCapture : captures.at(-1)
-  const onlineWait = mode === 'online' && linkPhase !== 'open'
-  const ourTurn = game.turn() === playerColor
-  const movesLocked = finished || isReview || isComputerTurn || !ourTurn || onlineWait || linkBusy
-  const possibleMoves = selected && !movesLocked ? game.moves({ square: selected, verbose: true }) : []
-  const legalSquares = possibleMoves.map(move => move.to)
-  const captureOptions = possibleMoves.filter(move => move.captured && (!move.promotion || move.promotion === 'q')).map(move => ({ move, odds: getCaptureOdds(game, move)! }))
-  const colorName = playerColor === 'w' ? 'white' : 'black'
-  const rows = Array.from({ length: 8 }, (_, index) => isReversed ? index + 1 : 8 - index)
-  const files = (isReversed ? 'hgfedcba' : 'abcdefgh').split('')
-  const winner: Color | null = endReason === 'resigned'
-    ? (resignColor === 'w' ? 'b' : resignColor === 'b' ? 'w' : computerColor)
-    : endReason?.startsWith('timeout')
-      ? (endReason === 'timeout-w' ? 'b' : 'w')
-      : endReason?.startsWith('capture')
-        ? (endReason === 'capture-w' ? 'b' : 'w')
-        : game.isCheckmate()
-          ? (game.turn() === 'w' ? 'b' : 'w')
-          : null
-  const resultTitle = winner
-    ? (winner === playerColor ? 'Well played. You win!' : 'A good game. A new lesson.')
-    : 'An evenly matched game.'
-  const resultDetail = endReason === 'resigned'
-    ? (mode === 'computer'
-      ? 'You resigned. The computer wins.'
-      : resignColor === playerColor ? 'You resigned.' : 'Your friend resigned.')
-    : endReason?.startsWith('timeout')
-      ? (mode === 'computer'
-        ? `${winner === playerColor ? 'The computer' : 'You'} ran out of time.`
-        : `${endReason === 'timeout-w' ? 'White' : 'Black'} ran out of time.`)
-      : endReason?.startsWith('capture')
-        ? `The capture failed to escape check. ${winner === 'w' ? 'White' : 'Black'} wins.`
-        : game.isCheckmate()
-          ? `Checkmate. ${winner === 'w' ? 'White' : 'Black'} wins.`
-          : game.isStalemate()
-            ? 'A draw by stalemate.'
-            : isCaptureRepetition(game)
-              ? 'A draw by threefold repetition.'
-              : game.isInsufficientMaterial()
-                ? 'A draw by insufficient material.'
-                : 'The game ends in a draw.'
-  const statusText = finished
-    ? (mode === 'computer'
-      ? (winner === playerColor ? 'You win. Well played!' : winner ? 'The computer wins' : 'Draw — well played')
-      : winner ? `${winner === 'w' ? 'White' : 'Black'} wins` : 'Draw')
-    : onlineWait
-      ? (linkPhase === 'idle' ? (history.length ? 'This link ended. Start a new game.' : 'Invite a friend to start.') : 'The link is not open.')
-      : isReview
-        ? `Move ${Math.ceil(activePly / 2)} · Review`
-        : mode === 'computer'
-          ? (isComputerTurn ? 'The computer is thinking' : game.isCheck() ? 'You are in check' : 'Your move')
-          : game.turn() !== playerColor
-            ? 'Your friend has the next move.'
-            : game.isCheck()
-              ? 'You are in check'
-              : 'Your move'
-  const opponentLabel = mode === 'computer' ? LEVELS[level - 1].name : 'Online'
-  const activeColor: Color = playerColor
-  const infoModal = modal === 'archive' || modal === 'learn' || modal === 'preferences'
+  const initialInvite = useRef(location.hash.startsWith('#play/') ? location.hash.slice(6) : location.hash.startsWith('#join/') ? location.href : '')
+  const modalRef = useRef<HTMLElement>(null)
+  sessionRef.current = session
+  configRef.current = { mode, playerColor, settings }
+  const state = latest(session)
+  const outcome = useMemo(() => battleOutcome(state), [state])
+  const finished = Boolean(outcome || session.resigned)
+  const winner = session.resigned ? other(session.resigned) : state.winner
+  const reviewing = review !== null
+  const display = animation ? animation.stage === 'launch' ? animation.before : animation.after : reviewing ? session.states[review] : state
+  const ourTurn = mode === 'local' || state.turn === playerColor
+  const connected = mode !== 'online' || phase === 'open'
+  const locked = finished || reviewing || Boolean(animation) || !ourTurn || !connected
+  const reversed = (playerColor === 'b') !== flipped
+  const rows = Array.from({ length: 8 }, (_, i) => reversed ? i + 1 : 8 - i)
+  const files = (reversed ? 'hgfedcba' : 'abcdefgh').split('')
+  const options = useMemo(() => selected && !locked ? battleActions(state, selected) : [], [selected, locked, state])
+  const attacks = options.filter(action => action.kind === 'attack')
+  const selectedPiece = selected ? display.board[selected] : undefined
+  const actions = session.states.slice(1).map(item => item.lastAction!).filter(Boolean)
+  const lastAction = display.lastAction
+  const opponentColor = other(playerColor)
+  const status = animation
+    ? animation.action.kind === 'attack' ? animation.action.lethal ? 'Lethal hit. Capture in progress.' : 'Attack in progress.' : 'Piece on the move.'
+    : reviewing ? `Review · turn ${Math.ceil(display.ply / 2) || 1}`
+      : finished ? winner ? `${side(winner)} wins.` : 'The battle ends in a draw.'
+        : !connected ? phase === 'idle' || phase === 'closed' ? 'Connect a friend to play.' : 'Wait for your friend to connect.'
+          : mode === 'computer' && !ourTurn ? 'The computer plans its next action.'
+            : mode === 'local' ? `${side(state.turn)} to act.` : ourTurn ? 'Your turn. Move or attack.' : 'Your friend has the next turn.'
+  const helper = selectedPiece
+    ? `${UNIT_STATS[selectedPiece.type].name} on ${selected} · ${selectedPiece.hp}/${UNIT_STATS[selectedPiece.type].health} HP · ${attacks.length} attack target${attacks.length === 1 ? '' : 's'}`
+    : 'Select a piece to see its moves, attack range, and damage.'
 
-  useEffect(() => { soundRef.current = settings.sound }, [settings.sound])
+  const cancelAnimation = useCallback(() => {
+    timers.current.forEach(clearTimeout)
+    timers.current = []
+    animationRef.current = false
+    inbox.current = []
+    setAnimation(null)
+  }, [])
 
-  useEffect(() => {
-    document.documentElement.dataset.theme = settings.theme
-    const meta = document.querySelector('meta[name="theme-color"]')
-    const header = getComputedStyle(document.documentElement).getPropertyValue('--header-bg').trim()
-    if (meta && header) meta.setAttribute('content', header)
-  }, [settings.theme])
+  const execute = useCallback((input: { from: string; to: string; promotion?: string }, remote = false) => {
+    const current = sessionRef.current
+    const before = latest(current)
+    if (current.resigned || animationRef.current || battleOutcome(before)) return false
+    const after = applyBattleAction(before, input)
+    if (!after?.lastAction) return false
+    const action = after.lastAction
+    const next = { ...current, states: [...current.states, after] }
+    sessionRef.current = next
+    animationRef.current = true
+    setSession(next)
+    setSelected(null)
+    setHovered(null)
+    setReview(null)
+    setPromotion(null)
+    const id = Date.now()
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const attack = action.kind === 'attack'
+    const duration = reduced ? 80 : attack ? action.lethal ? 1000 : 900 : 430
+    setAnimation({ id, action, before, after, stage: 'launch' })
+    const schedule = (delay: number, fn: () => void) => timers.current.push(setTimeout(fn, delay))
+    schedule(reduced ? 10 : attack ? 300 : 25, () => {
+      setAnimation(currentAnimation => currentAnimation?.id === id ? { ...currentAnimation, stage: attack ? 'impact' : 'travel' } : currentAnimation)
+      if (configRef.current.settings.sound) sound(attack, action.lethal)
+    })
+    if (attack && action.lethal) schedule(reduced ? 25 : 430, () => setAnimation(currentAnimation => currentAnimation?.id === id ? { ...currentAnimation, stage: 'travel' } : currentAnimation))
+    schedule(duration, () => {
+      setAnimation(null)
+      animationRef.current = false
+      const pending = inbox.current.splice(0)
+      pending.forEach(message => receiveRef.current(message))
+    })
+    if (!remote && configRef.current.mode === 'online') linkRef.current?.send({ type: 'battle-action', version: 2, gameId: current.id, ply: before.ply, from: input.from, to: input.to, promotion: input.promotion, before: stateKey(before) })
+    return true
+  }, [])
 
-  useEffect(() => {
-    if (!captureEffect) return
-    const timer = setTimeout(() => setCaptureEffect(null), captureEffect.success ? 1400 : 2600)
-    return () => clearTimeout(timer)
-  }, [captureEffect])
-
-  const commitMove = useCallback((move: ComputerMove, remote = false, roll?: number) => {
-    if (endRef.current || isCaptureGameOver(game)) return false
-    try {
-      const before = game.fen()
-      const result = resolveMove(game, move, roll)
-      if (result.capture) {
-        const capture = result.capture
-        setCaptures(current => [...current, capture])
-        setCaptureEffect(capture)
-        game.setHeader('Variant', 'Probabilistic captures')
-        const comment = `${NAMES[capture.piece]} ${capture.from}-${capture.to}: capture ${capture.success ? 'succeeded' : 'failed'}; chance ${capture.chance}%; roll ${(capture.roll * 100).toFixed(1)}%.${result.defeated ? ' Failed escape from check loses the game.' : ''}`
-        game.setComment([game.getComment(), comment].filter(Boolean).join(' '))
-      }
-      if (result.defeated) {
-        const reason = result.defeated === 'w' ? 'capture-w' : 'capture-b'
-        endRef.current = reason
-        game.setHeader('Result', result.defeated === 'w' ? '0-1' : '1-0')
-        game.setHeader('Termination', 'Failed capture from check')
-        setEndReason(reason)
-      }
-      setFen(game.fen())
-      setSelected(null)
-      setPromotion(null)
-      setReviewPly(null)
-      if (soundRef.current) playMoveSound(Boolean(result.capture?.success))
-      if (!remote && modeRef.current === 'online' && linkRef.current?.phase === 'open') {
-        linkRef.current.send({ type: 'move', from: move.from, to: move.to, promotion: move.promotion, before, roll: result.capture?.roll, fen: game.fen(), pgn: game.pgn(), seconds: secondsRef.current })
-      }
-      return true
-    } catch { setSelected(null); return false }
-  }, [game])
-
-  useEffect(() => {
-    if (mode !== 'computer' || linkBusy || game.turn() === playerColor || finished) return
-    const worker = new Worker(new URL('./engine.worker.ts', import.meta.url), { type: 'module' })
-    const started = performance.now()
-    let timer: ReturnType<typeof setTimeout>
-    const apply = (move: ComputerMove | null) => {
-      const fallback = game.moves({ verbose: true })[0]
-      const next = move || fallback
-      if (next) timer = setTimeout(() => commitMove(next), Math.max(0, 650 - (performance.now() - started)))
-    }
-    worker.onmessage = ({ data }: MessageEvent<EngineResponse>) => {
-      if (data.fen === game.fen()) apply(data.move)
-    }
-    worker.onerror = () => apply(null)
-    worker.postMessage({ fen, level, requestId: fen })
-    return () => { worker.terminate(); clearTimeout(timer) }
-  }, [fen, level, playerColor, finished, game, commitMove, mode, linkBusy])
-
-  useEffect(() => {
-    if (!timed || finished || history.length === 0) return
-    const timer = setInterval(() => {
-      setSeconds(current => ({ ...current, [game.turn()]: Math.max(0, current[game.turn()] - 1) }))
-    }, 1000)
-    return () => clearInterval(timer)
-  }, [timed, finished, history.length, game])
-
-  useEffect(() => {
-    if (timed && !finished && (seconds.w === 0 || seconds.b === 0)) {
-      const color: Color = seconds.w === 0 ? 'w' : 'b'
-      setEndReason(color === 'w' ? 'timeout-w' : 'timeout-b')
-      if (mode === 'online' && linkRef.current?.phase === 'open') linkRef.current.send({ type: 'timeout', color })
-    }
-  }, [seconds, timed, finished, mode])
-
-  useEffect(() => {
-    try {
-      const moves = game.history({ verbose: true })
-      const record: GameRecord = { startFen: moves[0]?.before || game.fen(), moves: moves.map(move => move.san), headers: game.getHeaders(), comments: game.getComments() }
-      localStorage.setItem(SAVE_KEY, JSON.stringify({ pgn: game.pgn(), playerColor, level, seconds, timed, endReason, id: gameId, settings, mode, resignColor, captures, record }))
-    } catch { return }
-  }, [fen, game, playerColor, level, seconds, timed, endReason, gameId, settings, mode, resignColor, captures])
-
-  useEffect(() => {
-    if (!finished) return
-    setModal('result')
-    const entry: ArchivedGame = { id: gameId, pgn: game.pgn(), title: resultDetail, date: new Date().toISOString(), moves: Math.ceil(plyCount / 2), color: playerColor, level, mode }
-    setArchive(current => {
-      const next = [entry, ...current.filter(item => item.id !== gameId)].slice(0, 30)
-      try { localStorage.setItem(ARCHIVE_KEY, JSON.stringify(next)) } catch { return next }
+  function remember(current: Session) {
+    if (current.states.length < 2) return
+    setArchive(previous => {
+      const next = [current, ...previous.filter(item => item.id !== current.id)].slice(0, 12)
+      try { localStorage.setItem(ARCHIVE_KEY, JSON.stringify(next)) } catch { setNotice('The archive is full. Export this battle to keep a copy.') }
       return next
     })
-  }, [finished, gameId, game, resultDetail, playerColor, level, mode, plyCount])
+  }
 
-  useEffect(() => { historyRef.current?.scrollTo({ top: historyRef.current.scrollHeight, behavior: 'smooth' }) }, [plyCount])
-  useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(''), 3000); return () => clearTimeout(timer) } }, [toast])
+  function reset(nextMode: Mode, color: Color = 'w', id?: string) {
+    remember(sessionRef.current)
+    cancelAnimation()
+    const next = { ...newSession(), ...(id ? { id } : {}) }
+    sessionRef.current = next
+    setSession(next)
+    setMode(nextMode)
+    setPlayerColor(color)
+    configRef.current = { ...configRef.current, mode: nextMode, playerColor: color }
+    setSelected(null)
+    setReview(null)
+    setPromotion(null)
+    setError('')
+    setFlipped(false)
+    setModal(null)
+  }
+
+  function closeLink() {
+    const link = linkRef.current
+    linkRef.current = null
+    link?.close()
+    setPhase('idle')
+    setInvite('')
+    setCode('')
+  }
+
+  receiveRef.current = message => {
+    if (message.type === 'battle-start') {
+      const link = linkRef.current
+      if (!link || link.role !== 'guest' || (link.gameId && message.gameId !== link.gameId) || message.hostColor !== link.hostColor) return
+      if (sessionRef.current.id === message.gameId && latest(sessionRef.current).ply > 0) return
+      reset('online', other(message.hostColor), message.gameId)
+      return
+    }
+    if (message.type === 'battle-action') {
+      const current = sessionRef.current
+      if (message.gameId !== current.id || message.ply < latest(current).ply) return
+      if (animationRef.current) { inbox.current.push(message); return }
+      if (latest(current).turn === configRef.current.playerColor || message.ply !== latest(current).ply || message.before !== stateKey(latest(current))) {
+        setError('The battle states do not match. Start a new connection.')
+        return
+      }
+      if (!execute(message, true)) setError('Your friend sent an invalid action.')
+    }
+    if (message.type === 'battle-resign' && message.gameId === sessionRef.current.id && message.ply === latest(sessionRef.current).ply && message.color === other(configRef.current.playerColor)) {
+      setSession(current => ({ ...current, resigned: message.color }))
+    }
+  }
+
+  function bindLink(link: FriendLink) {
+    linkRef.current = link
+    setPhase(link.phase)
+    link.onMessage(message => { if (linkRef.current === link) receiveRef.current(message) })
+    link.onStatus(nextPhase => {
+      if (linkRef.current !== link) return
+      setPhase(nextPhase)
+      if (nextPhase === 'open' && link.role === 'host') {
+        link.send({ type: 'battle-start', version: 2, gameId: link.gameId, hostColor: link.hostColor })
+      }
+      if (nextPhase === 'failed') setError('The connection failed. Try a manual connection or a new invite.')
+    })
+  }
+
+  async function host(manual = false) {
+    closeLink()
+    reset('online', newColor)
+    const id = sessionRef.current.id
+    setPhase('gathering')
+    try {
+      if (manual) {
+        const link = await createOffer({ hostColor: newColor, timed: false, gameId: id })
+        if (sessionRef.current.id !== id) { link.close(); return }
+        bindLink(link)
+        setInvite(inviteLink(link.invite))
+      } else {
+        const room = makeRoomCode()
+        const link = new RelayLink(room, 'host', { hostColor: newColor, timed: false, gameId: id })
+        bindLink(link)
+        setCode(room)
+        setInvite(playLink(room))
+        await link.start()
+      }
+    } catch { setError('The invite could not start. Try again.'); setPhase('failed') }
+  }
+
+  async function join(input: string) {
+    if (!input.trim()) { setError('Enter the code or link from your friend.'); return }
+    const room = normalizeRoomCode(input)
+    closeLink()
+    reset('online', 'b')
+    const joiningId = sessionRef.current.id
+    setPhase('gathering')
+    try {
+      if (room) {
+        const link = new RelayLink(room, 'guest')
+        bindLink(link)
+        setCode(room)
+        await link.start()
+      } else {
+        const link = await createAnswer(input)
+        if (sessionRef.current.id !== joiningId) { link.close(); return }
+        bindLink(link)
+        setInvite(link.reply)
+      }
+    } catch { setError('This code is not valid. Check it and try again.'); setPhase('failed') }
+  }
+  joinRef.current = input => { void join(input) }
 
   useEffect(() => {
-    const openFromHash = () => {
-      const hash = location.hash
-      if (hash.startsWith('#play/') && normalizeRoomCode(hash)) joinRef.current(hash)
-      else if (hash.startsWith('#join/') && extractCode(hash).startsWith('cc1')) joinRef.current(extractCode(hash))
-    }
-    openFromHash()
-    window.addEventListener('hashchange', openFromHash)
-    return () => {
-      window.removeEventListener('hashchange', openFromHash)
-      linkRef.current?.close()
+    const input = initialInvite.current
+    if (input) {
+      history.replaceState(null, '', location.pathname + location.search)
+      const timer = setTimeout(() => { initialInvite.current = ''; joinRef.current(input) }, 0)
+      return () => clearTimeout(timer)
     }
   }, [])
 
   useEffect(() => {
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify({ version: 2, session, mode, playerColor, level, settings } satisfies SavedBattle)) }
+    catch { setNotice('The browser could not save this battle. Export it to keep a copy.') }
+  }, [session, mode, playerColor, level, settings])
+
+  useEffect(() => { document.documentElement.dataset.theme = settings.theme }, [settings.theme])
+
+  useEffect(() => () => {
+    timers.current.forEach(clearTimeout)
+    linkRef.current?.close()
+  }, [])
+
+  useEffect(() => {
+    if (mode !== 'computer' || state.turn === playerColor || finished || animation || reviewing || modal) return
+    const id = session.id
+    const before = stateKey(state)
+    let worker: Worker | null = null
+    const timer = setTimeout(() => {
+      const fallback = () => {
+        if (sessionRef.current.id !== id || stateKey(latest(sessionRef.current)) !== before) return
+        const moves = battleActions(state)
+        const action = moves.find(item => item.lethal) ?? moves.find(item => item.kind === 'attack') ?? moves[0]
+        if (action) execute(action)
+      }
+      try {
+        worker = new Worker(new URL('./battle.worker.ts', import.meta.url), { type: 'module' })
+        worker.onmessage = (event: MessageEvent<{ move: { from: string; to: string; promotion?: string } | null; requestId: number }>) => {
+          if (sessionRef.current.id !== id || stateKey(latest(sessionRef.current)) !== before) return
+          if (event.data.move) execute(event.data.move)
+          else fallback()
+        }
+        worker.onerror = fallback
+        worker.postMessage({ state, level, requestId: state.ply })
+      } catch { fallback() }
+    }, 380)
+    return () => { clearTimeout(timer); worker?.terminate() }
+  }, [mode, state, playerColor, finished, animation, reviewing, modal, session.id, level, execute])
+
+  useEffect(() => {
     if (!modal && !promotion) return
-    const previousFocus = document.activeElement as HTMLElement | null
-    requestAnimationFrame(() => modalRef.current?.querySelector<HTMLElement>('button, select, input')?.focus())
+    const previous = document.activeElement as HTMLElement | null
+    const element = modalRef.current
+    const focusable = () => Array.from(element?.querySelectorAll<HTMLElement>('button:not(:disabled), input, select, [tabindex="0"]') ?? [])
+    focusable()[0]?.focus()
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') { setModal(null); setPromotion(null) }
-      if (event.key === 'Tab') {
-        const items = modalRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), select, input, [tabindex="0"]')
-        if (!items?.length) return
-        const first = items[0]
-        const last = items[items.length - 1]
-        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
-        if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
-      }
+      if (event.key !== 'Tab') return
+      const items = focusable()
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
     }
     document.addEventListener('keydown', onKey)
-    return () => { document.removeEventListener('keydown', onKey); previousFocus?.focus() }
+    return () => { document.removeEventListener('keydown', onKey); previous?.focus() }
   }, [modal, promotion])
 
-  function applyRemote(message: PvpMessage) {
-    if (message.type === 'move') {
-      if (game.turn() === playerRef.current || endRef.current || isCaptureGameOver(game)) return
-      if (message.before !== undefined && message.before !== game.fen()) return
-      const legal = game.moves({ verbose: true }).find(move => move.from === message.from && move.to === message.to && move.promotion === message.promotion)
-      if (!legal || (legal.captured && message.roll === undefined)) return
-      const applied = commitMove({ from: message.from, to: message.to, promotion: message.promotion }, true, message.roll)
-      if (applied && message.seconds) setSeconds(message.seconds)
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setSelected(null); setHovered(null) }
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+
+  function chooseSquare(square: Square) {
+    if (locked) return
+    const action = options.find(item => item.to === square)
+    if (action) {
+      if (action.promotion) setPromotion({ from: action.from, to: action.to })
+      else execute(action)
       return
     }
-    if (message.type === 'resign') {
-      setResignColor(message.color)
-      setEndReason('resigned')
-      return
-    }
-    if (message.type === 'timeout') setEndReason(message.color === 'w' ? 'timeout-w' : 'timeout-b')
+    const piece = state.board[square]
+    setSelected(piece?.color === state.turn && square !== selected ? square : null)
+    setHovered(null)
   }
 
-  function takeRemote(message: PvpMessage) {
-    if (!readyRef.current) inboxRef.current.push(message)
-    else applyRemote(message)
-  }
-
-  function closeLink() {
-    sessionRef.current += 1
-    readyRef.current = false
-    inboxRef.current = []
-    linkRef.current?.close()
-    linkRef.current = null
-    setLinkPhase('idle')
-    setLinkBusy(false)
-    setLinkRole(null)
-    setLinkKind(null)
-    if (location.hash.startsWith('#play/') || location.hash.startsWith('#join/')) window.history.replaceState(null, '', `${location.pathname}${location.search}`)
-  }
-
-  function cancelLink() {
-    closeLink()
-    setLinkError('')
-    setModal(null)
-  }
-
-  function resetBoard(next: PendingGame) {
-    game.reset()
-    setFen(game.fen())
-    setGameId(next.id)
-    setPlayerColor(next.color)
-    setLevel(next.level)
-    setMode(next.mode)
-    setTimed(next.timed)
-    setSeconds({ w: START_TIME, b: START_TIME })
-    endRef.current = null
-    setEndReason(null)
-    setCaptures([])
-    setCaptureEffect(null)
-    setResignColor(null)
+  function undo() {
+    if (animation || reviewing || mode === 'online' || session.states.length <= 1) return
+    const states = session.states.slice(0, mode === 'computer' && state.turn === playerColor && session.states.length > 2 ? -2 : -1)
+    const next = { ...session, states, resigned: null }
+    sessionRef.current = next
+    setSession(next)
     setSelected(null)
-    setPromotion(null)
-    setReviewPly(null)
-    setFlipped(false)
+    setReview(null)
+  }
+
+  function resign() {
+    const color = mode === 'local' ? state.turn : playerColor
+    const next = { ...session, resigned: color }
+    sessionRef.current = next
+    setSession(next)
     setModal(null)
-    readyRef.current = next.mode === 'online'
-    if (next.mode === 'online') {
-      const queued = inboxRef.current.splice(0)
-      queued.forEach(applyRemote)
-      window.history.replaceState(null, '', `${location.pathname}${location.search}`)
-    }
+    if (mode === 'online') linkRef.current?.send({ type: 'battle-resign', version: 2, gameId: session.id, ply: state.ply, color })
   }
 
-  function attachLink(next: FriendLink, pending: () => PendingGame) {
-    const session = ++sessionRef.current
-    readyRef.current = false
-    inboxRef.current = []
-    linkRef.current?.close()
-    linkRef.current = next
-    setLinkPhase(next.phase)
-    setLinkBusy(true)
-    setLinkRole(next.role)
-    setLinkKind(next instanceof RelayLink ? 'relay' : 'manual')
-    setLinkError('')
-    next.onStatus(phase => {
-      if (sessionRef.current !== session) return
-      setLinkPhase(phase)
-      if (phase === 'open') {
-        setLinkBusy(false)
-        resetBoard(pending())
-        setToast('You are connected.')
-      }
-      if (phase === 'failed') setLinkError(next instanceof RelayLink ? 'The public relays are not reachable. Use a manual code.' : 'This connection failed. Some networks block a direct link.')
-      if (phase === 'closed') setToast('Your friend left the game.')
-    })
-    next.onMessage(message => {
-      if (sessionRef.current !== session) return
-      takeRemote(message)
-    })
-  }
-
-  function guestGame(next: FriendLink): PendingGame {
-    return { mode: 'online', color: next.hostColor === 'w' ? 'b' : 'w', level, timed: next.timed, id: next.gameId || crypto.randomUUID() }
-  }
-
-  function attemptMove(from: Square, to: Square) {
-    if (movesLocked) return
-    const moves = game.moves({ square: from, verbose: true }).filter(move => move.to === to)
-    if (!moves.length) return
-    if (moves.some(move => move.promotion)) setPromotion({ from, to })
-    else commitMove({ from, to })
-  }
-
-  function clickSquare(square: Square) {
-    if (movesLocked) return
-    if (selected && legalSquares.includes(square)) { attemptMove(selected, square); return }
-    const piece = game.get(square)
-    const movable = piece?.color === activeColor
-    setSelected(movable && square !== selected ? square : null)
-  }
-
-  function undoMove() {
-    if (!history.length || finished || mode === 'online') return
-    game.undo()
-    setCaptureEffect(null)
-    if (mode === 'computer' && game.turn() !== playerColor && game.history().length) game.undo()
-    setCaptures(current => current.filter(capture => capture.ply <= game.history().length))
-    game.getComments()
-    setFen(game.fen())
-    setSelected(null)
-    setReviewPly(null)
-    setPromotion(null)
-    setToast('Move taken back. Take another look.')
-  }
-
-  function openNewGame(preset: PlayMode = 'computer') {
-    setNewColor(playerColor)
-    setNewLevel(level)
-    setNewTimed(timed)
-    setNewMode(preset)
-    setLinkError('')
-    setMobileMenu(false)
-    setModal('new')
-  }
-
-  function openJoin() {
-    setJoinInput('')
-    setLinkError('')
-    setMobileMenu(false)
-    setModal('join')
-  }
-
-  async function startNewGame() {
-    if (linkBusy) return
-    const color: Color = newColor === 'random' ? (Math.random() < 0.5 ? 'w' : 'b') : newColor
-    const id = crypto.randomUUID()
-    if (newMode !== 'online') {
-      closeLink()
-      resetBoard({ mode: newMode, color, level: newLevel, timed: newTimed, id })
-      return
-    }
-    const code = makeRoomCode()
-    const next = new RelayLink(code, 'host', { hostColor: color, timed: newTimed, gameId: id })
-    attachLink(next, () => ({ mode: 'online', color, level: newLevel, timed: newTimed, id }))
-    setRoomCode(code)
-    setInviteText(playLink(code))
-    setModal('link')
-    try {
-      await next.start()
-    } catch {
-      next.fail()
-    }
-  }
-
-  async function startManual() {
-    const current = linkRef.current
-    const meta = { hostColor: current?.hostColor || 'w', timed: current?.timed ?? newTimed, gameId: current?.gameId || crypto.randomUUID() }
-    closeLink()
-    setLinkBusy(true)
-    try {
-      const next = await createOffer(meta)
-      attachLink(next, () => ({ mode: 'online', color: meta.hostColor, level, timed: meta.timed, id: meta.gameId }))
-      setInviteText(inviteLink(next.invite))
-      setReplyText('')
-      setAnswerInput('')
-      setModal('link')
-    } catch {
-      setLinkBusy(false)
-      setLinkError('The link could not start. Try again.')
-    }
-  }
-
-  async function joinCode(input: string) {
-    const code = normalizeRoomCode(input)
-    if (code) {
-      const next = new RelayLink(code, 'guest')
-      attachLink(next, () => guestGame(next))
-      setRoomCode(code)
-      setModal('link')
-      try {
-        await next.start()
-      } catch {
-        next.fail()
-      }
-      return
-    }
-    if (!extractCode(input).startsWith('cc1')) {
-      setLinkError('This code is not valid. Check it and try again.')
-      setModal('join')
-      return
-    }
-    setLinkBusy(true)
-    try {
-      const next = await createAnswer(input)
-      attachLink(next, () => guestGame(next))
-      setReplyText(next.reply)
-      setInviteText('')
-      setModal('link')
-    } catch (error) {
-      setLinkBusy(false)
-      setLinkError(error instanceof Error ? error.message : 'This link is not valid.')
-      setModal('join')
-    }
-  }
-  joinRef.current = (input: string) => { void joinCode(input) }
-
-  async function connectReply() {
-    if (!(linkRef.current && linkKind === 'manual')) return
-    setLinkError('')
-    try {
-      await acceptAnswer(linkRef.current as PvpLink, answerInput)
-    } catch (error) {
-      setLinkError(error instanceof Error ? error.message : 'This reply is not valid.')
-    }
-  }
-
-  async function shareInvite() {
-    try {
-      await navigator.share({ title: 'Play chess with me', text: `Join my chess game. Code ${formatRoomCode(roomCode)}.`, url: inviteText })
-    } catch { return }
-  }
-
-  async function copyText(value: string) {
-    try {
-      await navigator.clipboard.writeText(value)
-      setToast('Copied. Send it to your friend.')
-    } catch {
-      setToast('Select the text and copy it.')
-    }
-  }
-
-  function confirmResign() {
-    const color = playerColor
-    setResignColor(color)
-    setEndReason('resigned')
-    setModal(null)
-    if (mode === 'online' && linkRef.current?.phase === 'open') linkRef.current.send({ type: 'resign', color })
-  }
-
-  function downloadPgn(pgn = game.pgn(), id = gameId) {
-    if (!pgn) { setToast('Make your first move to save this game.'); return }
-    const url = URL.createObjectURL(new Blob([pgn], { type: 'application/x-chess-pgn' }))
+  function download() {
+    const content = JSON.stringify({ version: 2, session, mode, playerColor, level, settings }, null, 2)
+    const url = URL.createObjectURL(new Blob([content], { type: 'application/json' }))
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `chess-but-real-${id.slice(0, 8)}.pgn`
+    anchor.download = `health-chess-${session.id.slice(0, 8)}.json`
     anchor.click()
-    URL.revokeObjectURL(url)
-    setToast('Your game is saved as a PGN file.')
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  function navigateModal(value: ModalType) { setMobileMenu(false); setModal(value) }
-  function updateSetting<K extends keyof Settings>(key: K, value: Settings[K]) { setSettings(current => ({ ...current, [key]: value })) }
-  function reviewMove(ply: number) { setSelected(null); setReviewPly(ply >= plyCount ? null : Math.max(0, ply)) }
-
-  function moveLabel(ply: number) {
-    const capture = captures.find(attempt => attempt.ply === ply + 1)
-    return capture && !capture.success ? `${capture.from}×${capture.to} failed` : history[ply]?.san || '—'
+  async function copyInvite() {
+    try { await navigator.clipboard.writeText(invite); setNotice('The invite is copied.') }
+    catch { setNotice('Select the invite text and copy it.') }
   }
 
-  function capturedPieces(color: Color) {
-    const pieces = history.filter(move => move.color === color && move.captured).map(move => move.captured!)
-    return <span className="captured-pieces">{pieces.map((piece, index) => <ChessPiece key={`${piece}-${index}`} color={color === 'w' ? 'b' : 'w'} type={piece} />)}</span>
+  function position(square: Square) {
+    return { x: files.indexOf(square[0]) * 100 + 50, y: rows.indexOf(Number(square[1])) * 100 + 50 }
   }
 
-  function playerBar(computer: boolean) {
-    const color = computer ? computerColor : playerColor
-    return <div className={`player-bar ${computer ? 'opponent-bar' : 'you-bar'}`}>
-      <span className={`player-color color-${color === 'w' ? 'white' : 'black'}`} aria-hidden="true" />
-      <div className="player-info"><div className="player-name">{computer ? (mode === 'computer' ? 'The Computer' : 'Friend') : 'You'}</div><div className="player-subtitle">{computer ? (mode === 'computer' ? `${LEVELS[level - 1].name} · Level ${level}` : 'Online') : `Playing as ${colorName}`}{capturedPieces(color)}</div></div>
-      <div className={`clock ${!computer && !finished ? 'your-clock' : ''} ${game.turn() === color && history.length > 0 && !finished ? 'clock-active' : ''} ${seconds[color] < 60 && timed ? 'clock-low' : ''}`} aria-label={`${computer ? (mode === 'computer' ? 'Computer' : 'Friend') : 'Your'} time: ${formatTime(seconds[color])}`}><Clock3 size={16} />{timed ? formatTime(seconds[color]) : '∞'}</div>
+  function renderPlayer(color: Color) {
+    const total = healthTotal(display, color).current
+    const maximum = healthTotal(session.states[0], color).max
+    const yours = color === playerColor
+    const active = display.turn === color && !finished && !reviewing
+    return <div className={`player-bar ${yours ? 'you' : 'opponent'}`}>
+      <span className="player-avatar"><ChessPiece type="k" color={color} /></span>
+      <div className="player-info"><strong>{mode === 'local' ? `${side(color)} army` : yours ? 'You' : mode === 'computer' ? 'The Computer' : 'Your friend'}{active && <span className="turn-pill">ON TURN</span>}</strong><small>{mode === 'computer' && !yours ? `${LEVELS[level - 1]} · Level ${level}` : `${side(color)} pieces${mode === 'online' ? ` · ${phase === 'open' ? 'Connected' : 'Not connected'}` : ''}`}</small><div className="army-health"><span style={{ width: `${maximum ? total / maximum * 100 : 0}%` }} /></div></div>
+      <div className="player-total"><strong><Heart size={14} />{total.toLocaleString()}</strong><small>ARMY HEALTH</small></div>
     </div>
   }
 
-  function settingsContent() {
-    return <div className="settings-content">
-      {([
-        ['hints', 'Legal moves', 'See where each piece can go.'],
-        ['coordinates', 'Board coordinates', 'Keep the ranks and files in view.'],
-        ['sound', 'Move sounds', 'A little sound with every move.'],
-      ] as const).map(([key, title, description]) => <div className="setting-row" key={key}><div><strong>{title}</strong><small>{description}</small></div><button type="button" className={`toggle ${settings[key] ? 'is-on' : ''}`} role="switch" aria-checked={settings[key]} aria-label={title} onClick={() => updateSetting(key, !settings[key])}><span /></button></div>)}
-      <div className="theme-setting"><strong>Color theme</strong><div className="theme-options">{(['mono', 'sage', 'walnut', 'slate'] as const).map(theme => <button key={theme} className={`theme-option ${theme} ${settings.theme === theme ? 'chosen' : ''}`} onClick={() => updateSetting('theme', theme)} aria-label={`${theme} theme`} aria-pressed={settings.theme === theme}><span className="theme-swatch">{settings.theme === theme && <Check size={16} />}</span><span>{theme}</span></button>)}</div></div>
-      <div className="local-note"><ShieldCheck size={16} /><span>Your preferences stay on this device.</span></div>
-    </div>
-  }
+  const anim = animation?.action
+  const moving = animation && (anim?.kind === 'move' || anim?.lethal && animation.stage !== 'launch')
+  const movingIds = moving ? [animation.before.board[animation.action.from]?.id, animation.action.rookFrom ? animation.before.board[animation.action.rookFrom]?.id : null] : []
+  const sourcePoint = anim ? position(anim.from) : null
+  const targetPoint = anim ? position(anim.to) : null
+  const targetAction = attacks.find(action => action.to === hovered) ?? attacks[0]
+  const modalTitle = promotion ? 'Choose your new piece.' : modal === 'rules' ? 'Every piece has a life.' : modal === 'settings' ? 'Make the board yours.' : modal === 'resign' ? 'End this battle?' : modal === 'archive' ? 'Your recent battles.' : 'A new kind of chess.'
 
-  function modeOptions() {
-    return <><label id="opponent-label">Opponent</label><div className="mode-options" role="group" aria-labelledby="opponent-label">
-      {([['online', 'Online friend'], ['computer', 'Computer']] as const).map(([value, label]) => <button key={value} type="button" className={newMode === value ? 'chosen' : ''} aria-pressed={newMode === value} onClick={() => setNewMode(value)}>{label}</button>)}
-    </div></>
-  }
-
-  function newGameFooter() {
-    return <>
-      <button className="primary-button" onClick={() => { void startNewGame() }}>{newMode === 'online' ? <><Users size={18} />Create invite link</> : <>Let’s play<ArrowRight size={18} /></>}</button>
-      {newMode === 'online' && <button className="text-button" onClick={openJoin}>I have a code</button>}
-      <div className="modal-footnote">{newMode === 'computer' ? 'White moves first. A good game starts here.' : 'Send one short link. The game starts when your friend opens it.'}</div>
-      {linkError && <p className="link-error" role="alert">{linkError}</p>}
-    </>
-  }
-
-  function joinContent() {
-    return <><h2 id="modal-title">Join a friend.</h2><p>Type the code from your friend, or paste the link.</p>
-      <form className="link-fields" onSubmit={event => { event.preventDefault(); void joinCode(joinInput) }}>
-        <label htmlFor="join-code">Game code</label>
-        <input id="join-code" className="code-input" value={joinInput} placeholder="K7QX-M2P4" autoComplete="off" autoCapitalize="characters" spellCheck={false} onChange={event => setJoinInput(event.target.value)} />
-        {linkError && <p className="link-error" role="alert">{linkError}</p>}
-        <button type="submit" className="primary-button" disabled={!joinInput.trim()}>Join game<ArrowRight size={18} /></button>
-      </form></>
-  }
-
-  function linkContent() {
-    const failed = linkPhase === 'failed'
-    const footer = <div className="link-footer">
-      {linkKind === 'relay' && linkRole === 'host' && <button type="button" className="text-button" onClick={() => { void startManual() }}>Use a manual code instead</button>}
-      <button type="button" className="text-button" onClick={cancelLink}>Cancel</button>
-    </div>
-    if (linkKind === 'relay' && linkRole === 'host') {
-      return <><h2 id="modal-title">Invite a friend.</h2><p>Send this link, or tell your friend the code. The game starts when your friend joins.</p>
-        <div className="room-code" aria-label="Game code">{formatRoomCode(roomCode)}</div>
-        <div className="link-fields"><label htmlFor="invite-link">Invite link</label><input id="invite-link" className="code-input" readOnly value={inviteText} onFocus={event => event.currentTarget.select()} /></div>
-        <div className="modal-button-row"><button type="button" className="primary-button" onClick={() => { void copyText(inviteText) }}><Copy size={16} />Copy link</button>{typeof navigator.share === 'function' && <button type="button" className="secondary-button" onClick={() => { void shareInvite() }}><Share2 size={16} />Share</button>}</div>
-        {linkError && <p className="link-error" role="alert">{linkError}</p>}
-        <p className="friend-note link-status" role="status">{failed ? 'The link could not start.' : <><span className="status-dot" />Waiting for your friend</>}</p>
-        {footer}</>
+  function movingPiece(from: Square, to: Square, piece: BattlePiece, key: string) {
+    const start = position(from)
+    const end = position(to)
+    const style: CSSProperties = {
+      left: `${(start.x - 50) / 8}%`, top: `${(start.y - 50) / 8}%`, width: '12.5%', height: '12.5%',
+      transform: animation?.stage === 'travel' ? `translate(${end.x - start.x}%, ${end.y - start.y}%)` : 'translate(0, 0)',
+      transition: 'transform 420ms cubic-bezier(.22,.68,.18,1)',
     }
-    if (linkKind === 'relay') {
-      return <><h2 id="modal-title">Joining your friend.</h2><p>Code {formatRoomCode(roomCode)}. Keep this page open. Your friend must keep the invite open too.</p>
-        {linkError && <p className="link-error" role="alert">{linkError}</p>}
-        <p className="friend-note link-status" role="status">{failed ? 'The connection could not start.' : <><span className="status-dot" />Connecting</>}</p>
-        {failed && <p className="friend-note">Ask your friend for a manual code.</p>}
-        {footer}</>
-    }
-    return <><h2 id="modal-title">{linkRole === 'guest' ? 'Send this reply.' : 'Share this link.'}</h2><p>{linkRole === 'guest' ? 'Send this reply to your friend. A reload ends this link.' : 'Send this link. Then paste the reply. A reload ends this link.'}</p>
-      <div className="link-fields">{linkRole === 'guest' ? <><label htmlFor="reply-code">Reply code</label><textarea id="reply-code" readOnly value={replyText} spellCheck={false} /></> : <><label htmlFor="invite-link">Invite link</label><textarea id="invite-link" readOnly value={inviteText} spellCheck={false} /><button type="button" className="secondary-button" onClick={() => { void copyText(inviteText) }}><Copy size={16} />Copy invite link</button><label htmlFor="friend-reply">Friend reply</label><textarea id="friend-reply" value={answerInput} spellCheck={false} onChange={event => setAnswerInput(event.target.value)} /></>}</div>
-      {linkError && <p className="link-error" role="alert">{linkError}</p>}
-      <p className="friend-note" role="status">{linkPhase === 'connecting' ? 'The link is in progress.' : failed ? 'This connection failed.' : linkRole === 'guest' ? 'Wait for your friend to connect.' : 'Paste the reply, then connect.'}</p>
-      {linkRole === 'host' && <button className="primary-button" onClick={() => { void connectReply() }} disabled={!answerInput.trim() || linkPhase === 'connecting'}>Connect<ArrowRight size={18} /></button>}
-      {linkRole === 'guest' && <button type="button" className="secondary-button" onClick={() => { void copyText(replyText) }}><Copy size={16} />Copy reply</button>}
-      {footer}</>
+    return <div key={key} className="moving-piece" style={style} aria-hidden="true"><span className="piece-visual"><ChessPiece type={piece.type} color={piece.color} /></span><PieceHealth piece={piece} /></div>
   }
 
-  return <div className="app-shell">
-    <header className="app-header">
-      <button className="brand" onClick={() => { setModal(null); setMobileMenu(false) }} aria-label="Chess but real home">
-        <span className="brand-mark"><ChessPiece type="n" color="w" /></span>
-        <span>Chess<span className="brand-light"> but real</span><span className="brand-period">.</span></span>
-      </button>
-      <button className="mobile-menu-button" aria-label="Open navigation" aria-expanded={mobileMenu} aria-controls="main-navigation" onClick={() => setMobileMenu(true)}><Menu size={22} /></button>
-      {mobileMenu && <button className="sidebar-backdrop" aria-label="Close navigation" onClick={() => setMobileMenu(false)} />}
-      <nav id="main-navigation" className={`sidebar ${mobileMenu ? 'sidebar-open' : ''}`} aria-label="Main navigation">
-        <IconButton label="Close navigation menu" className="sidebar-close" onClick={() => setMobileMenu(false)}><X size={20} /></IconButton>
-        <button className={`nav-item ${!infoModal && mode !== 'computer' ? 'nav-active' : ''}`} onClick={() => openNewGame('online')}><Users size={18} /><span>Play a friend</span></button>
-        <button className={`nav-item ${!infoModal && mode === 'computer' ? 'nav-active' : ''}`} onClick={() => openNewGame('computer')}><Swords size={18} /><span>Play computer</span></button>
-        <button className={`nav-item ${modal === 'archive' ? 'nav-active' : ''}`} onClick={() => navigateModal('archive')}><History size={18} /><span>My games</span>{archive.length > 0 && <span className="nav-count">{archive.length}</span>}</button>
-        <button className={`nav-item ${modal === 'learn' ? 'nav-active' : ''}`} onClick={() => navigateModal('learn')}><BookOpen size={18} /><span>How to play</span></button>
-        <button className={`nav-item ${modal === 'preferences' ? 'nav-active' : ''}`} onClick={() => navigateModal('preferences')}><Settings2 size={18} /><span>Preferences</span></button>
-      </nav>
-    </header>
-
-    <main className="main-content" aria-label="Play against the computer">
-
-      <div className="game-layout">
-        <section className="board-section" aria-label="Chess game">
-          {playerBar(true)}
-          <div className={`board-frame ${!settings.coordinates ? 'no-coordinates' : ''}`}>
-            <div className="rank-labels" aria-hidden="true">{rows.map(rank => <span key={rank}>{rank}</span>)}</div>
-            <div className="chessboard" role="group" aria-label={`Chess board. ${game.turn() === 'w' ? 'White' : 'Black'} to move`}>
-              {rows.flatMap(rank => files.map(file => {
-                const square = `${file}${rank}` as Square
-                const piece = displayGame.get(square)
-                const dark = (file.charCodeAt(0) - 97 + rank) % 2 === 1
-                const isLegal = legalSquares.includes(square) && settings.hints
-                const capture = isLegal ? captureOptions.find(option => option.move.to === square) : undefined
-                const isLast = lastMove?.from === square || lastMove?.to === square
-                const isCheck = piece?.type === 'k' && piece.color === displayGame.turn() && displayGame.isCheck()
-                const isCapturedSquare = captureEffect?.success && captureEffect.to === square
-                const isFailedFrom = captureEffect && !captureEffect.success && captureEffect.from === square
-                const isFailedTo = captureEffect && !captureEffect.success && captureEffect.to === square
-                return <button key={square} type="button" data-square={square} className={`square ${dark ? 'dark' : 'light'} ${selected === square ? 'selected' : ''} ${isLast ? 'last-move' : ''} ${isCheck ? 'in-check' : ''} ${capture ? 'can-capture' : ''} ${isCapturedSquare ? 'capture-success-square' : ''} ${isFailedFrom ? 'capture-failed-from' : ''} ${isFailedTo ? 'capture-failed-to' : ''}`} aria-label={`${square}${piece ? `, ${piece.color === 'w' ? 'white' : 'black'} ${NAMES[piece.type].toLowerCase()}` : ', empty'}${isLegal ? ', legal move' : ''}${capture ? `, ${capture.odds.chance}% capture chance` : ''}`} title={capture ? `Capture: ${capture.odds.chance}%. Strength ${capture.odds.strengthBonus >= 0 ? '+' : ''}${capture.odds.strengthBonus}. Support ${capture.odds.supportBonus >= 0 ? '+' : ''}${capture.odds.supportBonus}.` : undefined} aria-pressed={selected === square} onClick={() => clickSquare(square)} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); const from = event.dataTransfer.getData('text/plain'); if (/^[a-h][1-8]$/.test(from)) attemptMove(from as Square, square) }}>
-                  {piece && <span className={`piece-container ${captureEffect && !captureEffect.success && captureEffect.from === square ? 'piece-repelled' : ''} ${isCapturedSquare ? 'piece-captured' : ''}`} draggable={piece.color === activeColor && !movesLocked} onDragStart={event => { if (piece.color !== activeColor || movesLocked) { event.preventDefault(); return } setSelected(square); event.dataTransfer.setData('text/plain', square); event.dataTransfer.effectAllowed = 'move' }}><ChessPiece type={piece.type} color={piece.color} /></span>}
-                  {isLegal && !piece && !capture && <span className="legal-dot" />}
-                  {capture && <span className="capture-badge" aria-hidden="true">{capture.odds.chance}%</span>}
-                  {isFailedFrom && <span className="capture-effect-label capture-blocked-label" aria-hidden="true">BLOCKED</span>}
-                  {isFailedTo && <span className="capture-effect-label capture-held-label" aria-hidden="true">HELD</span>}
-                  {isCapturedSquare && <span className="capture-effect-label capture-taken-label" aria-hidden="true">CAPTURED</span>}
-                  {isFailedTo && <span className="capture-burst" aria-hidden="true"><i /><i /><i /><i /></span>}
-                </button>
-              }))}
-            </div>
-            <div className="file-labels" aria-hidden="true">{files.map(file => <span key={file}>{file}</span>)}</div>
+  return <div className="battle-app">
+    <header className="site-header"><div className="header-inner"><button className="brand" onClick={() => { setNewMode(mode); setModal('new') }} aria-label="Chess but real home"><ChessPiece type="n" color="w" /><span>Chess <em>but real.</em></span></button><span className="mode-label">HEALTH CHESS</span><nav className="header-nav" aria-label="Main navigation"><button className="nav-button" aria-label="Play a friend" onClick={() => { setNewMode('online'); setModal('new') }}><Users size={17} /><span className="mobile-label">Play a friend</span></button><button className="nav-button" aria-label="My games" onClick={() => setModal('archive')}><History size={17} /><span className="mobile-label">My games</span></button><button className="nav-button" aria-label="How to play" onClick={() => setModal('rules')}><BookOpen size={17} /><span className="mobile-label">How to play</span></button><button className="nav-button" onClick={() => setModal('settings')} aria-label="Preferences"><Settings2 size={18} /></button></nav></div></header>
+    <main className="battle-layout">
+      <section className="arena-column" aria-label="Health chess game">
+        <div className="arena-heading"><div><span className="eyebrow"><span className="status-light" /> THE BATTLEFIELD</span><h1>Chess. With a pulse.</h1><p>Wear them down. Then take their square.</p></div><span className="round-pill">ROUND <strong>{Math.floor(display.ply / 2) + 1}</strong></span></div>
+        {renderPlayer(opponentColor)}
+        <div className="board-shell">
+          <div className="rank-coordinates" aria-hidden="true">{rows.map(rank => <span key={rank}>{rank}</span>)}</div>
+          <div className="battle-board" role="group" aria-label={`Chess board. ${side(display.turn)} to act`}>
+            {rows.flatMap(rank => files.map(file => {
+              const square = `${file}${rank}` as Square
+              const piece = display.board[square]
+              const option = options.find(action => action.to === square)
+              const attack = option?.kind === 'attack' ? option : undefined
+              const isTarget = anim?.to === square && anim.kind === 'attack'
+              const impacted = isTarget && animation?.stage !== 'launch'
+              const name = piece ? `${side(piece.color).toLowerCase()} ${UNIT_STATS[piece.type].name.toLowerCase()}, ${piece.hp} of ${UNIT_STATS[piece.type].health} health` : 'empty'
+              return <button type="button" key={square} data-square={square} className={`battle-square ${(file.charCodeAt(0) - 97 + rank) % 2 === 0 ? 'light' : 'dark'} ${selected === square ? 'selected' : ''} ${lastAction?.from === square ? 'last-from' : ''} ${lastAction?.to === square ? 'last-to' : ''} ${settings.hints && option?.kind === 'move' ? 'move-option' : ''} ${settings.hints && attack ? attack.lethal ? 'attack-option lethal-option' : 'attack-option' : ''} ${hovered === square ? 'danger-square' : ''} ${impacted ? 'hit-target' : ''} ${anim?.from === square && animation?.stage === 'launch' && anim.kind === 'attack' ? 'attack-source' : ''}`} aria-label={`${square}, ${name}${attack ? `, attack for ${attack.damage} damage${attack.lethal ? ', lethal capture' : ''}` : option ? ', legal move' : ''}`} aria-pressed={selected === square} aria-disabled={locked} title={attack ? `${attack.damage} damage · ${attack.distance} square${attack.distance === 1 ? '' : 's'} · ${attack.falloff}% range reduction${attack.support ? ` · +${attack.support * SUPPORT_BONUS}% support (${attack.support})` : ''}${attack.lethal ? ' · Lethal' : ` · ${Math.max(0, (attack.targetHp ?? 0) - attack.damage)} HP remains`}` : piece ? `${UNIT_STATS[piece.type].name} · ${UNIT_STATS[piece.type].weaponName} · ${piece.hp}/${UNIT_STATS[piece.type].health} HP · ${UNIT_STATS[piece.type].damage} damage` : square} onClick={() => chooseSquare(square)} onMouseEnter={() => { if (attack) setHovered(square) }} onMouseLeave={() => setHovered(null)} onKeyDown={event => {
+                const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowUp' ? -8 : event.key === 'ArrowDown' ? 8 : 0
+                if (!step) return
+                event.preventDefault()
+                const index = rows.indexOf(rank) * 8 + files.indexOf(file)
+                const next = Math.max(0, Math.min(63, index + step))
+                document.querySelector<HTMLButtonElement>(`[data-square="${files[next % 8]}${rows[Math.floor(next / 8)]}"]`)?.focus()
+              }} onDragOver={event => { if (!locked) event.preventDefault() }} onDrop={event => { event.preventDefault(); if (!locked) { const from = event.dataTransfer.getData('text/plain'); const action = battleActions(state).find(item => item.from === from && item.to === square); if (action?.promotion) setPromotion({ from: action.from, to: action.to }); else if (action) execute(action) } }}>
+                {piece && !movingIds.includes(piece.id) && !(anim?.lethal && anim.kind === 'attack' && animation?.before.board[anim.victimSquare ?? anim.to]?.id === piece.id) && <><span className="piece-visual" draggable={!locked && piece.color === state.turn} onDragStart={event => { if (locked || piece.color !== state.turn) { event.preventDefault(); return } setSelected(square); event.dataTransfer.setData('text/plain', square) }}><ChessPiece type={piece.type} color={piece.color} /></span><PieceHealth piece={piece} /></>}
+                {settings.hints && option?.kind === 'move' && !piece && <span className="move-dot" aria-hidden="true" />}
+                {settings.hints && attack && <span className={`damage-preview ${attack.lethal ? 'kill-label' : ''} ${attack.support ? 'supported' : ''}`} aria-hidden="true">{attack.lethal ? 'CAPTURE' : `−${attack.damage}`}{attack.support > 0 && <i className="support-pips">{'▲'.repeat(Math.min(3, attack.support))}</i>}</span>}
+                {impacted && anim && <span key={animation!.id} className="damage-float" aria-hidden="true">−{anim.damage}{anim.lethal && <small>CAPTURED</small>}</span>}
+              </button>
+            }))}
+            {animation && anim?.kind === 'attack' && sourcePoint && targetPoint && <svg key={animation.id} className={`attack-layer stage-${animation.stage}`} viewBox="0 0 800 800" aria-hidden="true">
+              <WeaponFx weapon={UNIT_STATS[anim.piece].weapon} from={sourcePoint} to={targetPoint} stage={animation.stage} lethal={anim.lethal} support={anim.support} />
+            </svg>}
+            {animation && anim?.kind === 'attack' && anim.lethal && (() => {
+              const victimSquare = anim.victimSquare ?? anim.to
+              const victim = animation.before.board[victimSquare]
+              if (!victim) return null
+              const point = position(victimSquare)
+              return <div className="moving-piece" key={`${animation.id}-victim`} aria-hidden="true" style={{ left: `${(point.x - 50) / 8}%`, top: `${(point.y - 50) / 8}%`, width: '12.5%', height: '12.5%', opacity: animation.stage === 'launch' ? 1 : 0, transform: animation.stage === 'launch' ? 'scale(1)' : 'scale(.45)', transition: 'opacity 300ms ease, transform 350ms cubic-bezier(.3,0,.2,1)' }}><span className="piece-visual"><ChessPiece type={victim.type} color={victim.color} /></span><PieceHealth piece={victim} /></div>
+            })()}
+            {moving && animation.before.board[animation.action.from] && movingPiece(animation.action.from, animation.action.to, animation.before.board[animation.action.from]!, `${animation.id}-piece`)}
+            {moving && animation.action.rookFrom && animation.action.rookTo && animation.before.board[animation.action.rookFrom] && movingPiece(animation.action.rookFrom, animation.action.rookTo, animation.before.board[animation.action.rookFrom]!, `${animation.id}-rook`)}
           </div>
-          {playerBar(false)}
-          <div className="board-toolbar"><div className={`turn-status ${isComputerTurn ? 'thinking' : ''} ${finished ? 'finished-status' : ''}`} aria-live="polite"><span className="status-dot" />{statusText}{isComputerTurn && <span className="thinking-dots"><i /><i /><i /></span>}</div><div className="board-tools"><IconButton label="Flip board" onClick={() => setFlipped(value => !value)}><RotateCcw size={17} className="flip-icon" /></IconButton><IconButton label={settings.sound ? 'Mute sound' : 'Enable sound'} onClick={() => updateSetting('sound', !settings.sound)}>{settings.sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</IconButton><span className="tool-divider" /><IconButton label="Board preferences" onClick={() => setModal('preferences')}><Settings2 size={18} /></IconButton></div></div>
-          <div className="capture-notice"><Swords size={15} /><span>Captures are uncertain. A failed capture uses your turn.</span><button onClick={() => setModal('learn')}>Rules</button></div>
-          {captureEffect && !captureEffect.success && <div className="capture-fail-banner" role="alert" key={captureEffect.ply}>
-            <span className="capture-fail-icon"><ShieldCheck size={26} /></span>
-            <div><span className="capture-fail-kicker">Capture failed</span><strong>{NAMES[captureEffect.piece]} repelled at {captureEffect.to}</strong><span>The {NAMES[captureEffect.target].toLowerCase()} held the square. No piece moves, and the turn passes.</span></div>
-            <div className="capture-roll-fail"><strong>{captureEffect.chance}%</strong><span>Roll {(captureEffect.roll * 100).toFixed(1)} / 100 ✕</span></div>
-          </div>}
-          {recentCapture && <div className={`capture-result ${recentCapture.success ? 'capture-success' : 'capture-failure'}`} role="status">
-            <span className="capture-result-icon">{recentCapture.success ? <Check size={20} /> : <ShieldCheck size={20} />}</span>
-            <div><strong>{recentCapture.success ? 'Capture succeeded' : 'Capture failed'} · {recentCapture.from} → {recentCapture.to}</strong><span>{recentCapture.color === 'w' ? 'White' : 'Black'} {NAMES[recentCapture.piece].toLowerCase()} vs {NAMES[recentCapture.target].toLowerCase()}. {recentCapture.success ? 'The defender leaves the board.' : 'Both pieces stay in place.'}</span></div>
-            <div className="capture-roll"><strong>{recentCapture.chance}%</strong><span>Roll {(recentCapture.roll * 100).toFixed(1)} / 100</span></div>
-          </div>}
-          {isReview && <div className="board-help"><button onClick={() => setReviewPly(null)}><ArrowLeft size={15} />Back to the live game</button></div>}
-          {!isReview && linkPhase !== 'idle' && linkPhase !== 'open' && linkPhase !== 'closed' && modal !== 'link' && <div className="board-help"><button onClick={() => setModal('link')}>{linkRole === 'host' ? 'Show the invite' : 'Show the connection'}</button></div>}
+          <div className="file-coordinates" aria-hidden="true">{files.map(file => <span key={file}>{file}</span>)}</div>
+        </div>
+        {renderPlayer(playerColor)}
+        <div className="turn-banner" role="status" aria-live="polite"><span className="status-light" /><div><strong>{status}</strong><small>{helper}</small></div><button className="nav-button" aria-label="Flip board" title="Flip board" disabled={Boolean(animation)} onClick={() => setFlipped(value => !value)}><RotateCcw size={18} /></button><button className="nav-button" aria-label={settings.sound ? 'Mute sound' : 'Enable sound'} onClick={() => setSettings(current => ({ ...current, sound: !current.sound }))}>{settings.sound ? <Volume2 size={18} /> : <VolumeX size={18} />}</button></div>
+        <div className="board-legend"><span><i className="legend-dot health" />Piece health</span><span><i className="legend-dot range" />Attack damage</span><span><i className="legend-dot lethal" />Lethal capture</span><button className="text-button" onClick={() => setModal('rules')}>Read the rules <ArrowRight size={13} /></button></div>
+        {lastAction && <div className="combat-summary"><span className="summary-icon">{lastAction.kind === 'attack' ? <Swords size={20} /> : <MoveUpRight size={20} />}</span><div><strong>{describeAction(lastAction)}</strong><p>{lastAction.kind === 'attack' ? lastAction.lethal ? 'Target defeated. The attacker takes its square.' : `Both pieces hold position. ${Math.max(0, (lastAction.targetHp ?? lastAction.damage) - lastAction.damage)} target HP remains.` : 'One action complete. The other army takes its turn.'}</p></div>{lastAction.kind === 'attack' && <span className="summary-damage">−{lastAction.damage}<small>HEALTH</small></span>}</div>}
+        {reviewing && <div className="result-banner"><strong>Battle review</strong><p>Health and positions match this turn.</p><button className="primary-button" onClick={() => { setReview(null); setSelected(null) }}>Return to the live battle</button></div>}
+        {finished && !reviewing && !animation && <div className="result-banner"><strong>{winner ? `${side(winner)} wins the battle.` : 'The battle is a draw.'}</strong><p>{session.resigned ? `${side(session.resigned)} resigned.` : outcome}</p><button className="primary-button" onClick={() => { setNewMode(mode); setModal('new') }}>Play again</button></div>}
+      </section>
+      <aside className="battle-sidebar" aria-label="Battle controls">
+        <section className="control-panel"><div className="panel-heading"><span><Swords size={16} /> BATTLE CONTROL</span><span>{mode === 'computer' ? 'VS COMPUTER' : mode === 'local' ? 'LOCAL DUEL' : 'ONLINE DUEL'}</span></div><div className="mode-tabs" role="group" aria-label="Opponent">{(['computer', 'local', 'online'] as Mode[]).map(item => <button key={item} className={mode === item ? 'active' : ''} onClick={() => { if (item !== mode) { setNewMode(item); setModal('new') } }}>{item === 'computer' ? 'Computer' : item === 'local' ? 'Local friend' : 'Online'}</button>)}</div>
+          {mode === 'computer' && <label className="difficulty-field">Difficulty<select aria-label="Computer difficulty" value={level} onChange={event => setLevel(Number(event.target.value))}>{LEVELS.map((name, index) => <option key={name} value={index + 1}>{name} · Level {index + 1}</option>)}</select></label>}
+          <div className="action-buttons"><button className="primary-button" onClick={() => { setNewMode(mode); setModal('new') }}><Plus size={15} />New game</button><button className="secondary-button" onClick={undo} disabled={Boolean(animation) || reviewing || mode === 'online' || session.states.length <= 1 || mode === 'computer' && !ourTurn && !finished}><RotateCcw size={14} />Take back</button><button className="secondary-button" onClick={() => setModal('resign')} disabled={finished || Boolean(animation) || reviewing || !connected}><Flag size={14} />Resign</button></div>
         </section>
-
-        <aside className="game-sidebar" aria-label="Game controls">
-          <div className="game-panel">
-            <div className="panel-tabs" role="tablist" aria-label="Game panel">
-              <button role="tab" aria-selected={panelTab === 'game'} className={panelTab === 'game' ? 'tab-active' : ''} onClick={() => setPanelTab('game')}>Game</button>
-              <button role="tab" aria-selected={panelTab === 'settings'} className={panelTab === 'settings' ? 'tab-active' : ''} onClick={() => setPanelTab('settings')}>Settings</button>
-            </div>
-            <div className="game-actions">
-              <div className="friend-actions">
-                <button className="primary-button" onClick={() => openNewGame('online')}><Users size={18} />Play a friend</button>
-                <button className="secondary-button" onClick={openJoin}>Join</button>
-              </div>
-              <div className="secondary-actions">
-                <button onClick={() => openNewGame(mode)}><Plus size={16} />New game</button>
-                <button onClick={undoMove} disabled={!history.length || finished || mode === 'online'}><RotateCcw size={16} />Take back</button>
-                <button onClick={() => setModal('resign')} disabled={finished || !history.length}><Flag size={16} />Resign</button>
-              </div>
-            </div>
-            {panelTab === 'game' ? <>
-              {mode === 'computer' ? <div className="opponent-settings">
-                <div className="difficulty-label"><label htmlFor="difficulty">Difficulty</label><span>Level {level} of 4</span></div>
-                <div className="difficulty-select">
-                  <select id="difficulty" aria-label="Computer difficulty" value={level} onChange={event => setLevel(Number(event.target.value))}>{LEVELS.map((item, index) => <option key={item.name} value={index + 1}>{item.name}</option>)}</select>
-                  <ChevronDown size={16} />
-                </div>
-              </div> : <div className="opponent-settings"><p className="friend-note">Moves wait until the link is open.</p></div>}
-              <div className="capture-panel" aria-label="Capture odds">
-                <div className="capture-heading"><Swords size={16} /><span className="section-label">Capture odds</span><span>40–95%</span></div>
-                {captureOptions.length ? <div className="capture-options">{captureOptions.map(({ move, odds }) => <button type="button" key={move.to} onClick={() => attemptMove(move.from, move.to)} aria-label={`Attempt capture on ${move.to}, ${odds.chance}% chance`}>
-                  <div><strong>{odds.chance}%</strong><span>{NAMES[move.captured!]} on {move.to}</span></div>
-                  <small>Strength {odds.strengthBonus >= 0 ? '+' : ''}{odds.strengthBonus} · Support {odds.supportBonus >= 0 ? '+' : ''}{odds.supportBonus}</small>
-                  <small>{odds.attackers} allies · {odds.defenders} defenders</small>
-                </button>)}</div> : <p>Select a piece to see its capture chances.</p>}
-                <p className="capture-rule">Strength and support change the odds. A random roll decides each capture.</p>
-                {game.isCheck() && !finished && <p className="capture-warning">A failed capture from check loses the game.</p>}
-              </div>
-              <div className="history-section"><div className="history-heading"><span className="section-label">Move history</span><span className="move-count">{plyCount === 0 ? 'A fresh start' : `${Math.ceil(plyCount / 2)} ${plyCount < 3 ? 'move' : 'moves'}`}</span><IconButton label="Download game PGN" onClick={() => downloadPgn()}><ArrowDownToLine size={15} /></IconButton></div><div className={`move-history ${plyCount === 0 ? 'empty-history' : ''}`} ref={historyRef}>{plyCount === 0 ? <div className="empty-history-content"><p>Your moves will appear here.</p></div> : <><div className="history-column-labels"><span>#</span><span>White</span><span>Black</span></div>{Array.from({ length: Math.ceil(plyCount / 2) }, (_, index) => <div className="move-row" key={index}><span className="move-number">{index + 1}.</span>{[index * 2, index * 2 + 1].map(ply => <button key={ply} disabled={!history[ply] && !captures.some(capture => capture.ply === ply + 1)} className={activePly === ply + 1 ? 'current-move' : ''} onClick={() => reviewMove(ply + 1)}>{moveLabel(ply)}</button>)}</div>)}</>}</div><div className="history-navigation"><span>{isReview ? 'REVIEW' : 'LIVE GAME'}<i className={isReview ? 'review-dot' : ''} /></span><div><IconButton label="First position" disabled={!plyCount || activePly === 0} onClick={() => reviewMove(0)}><ChevronsLeft size={17} /></IconButton><IconButton label="Previous move" disabled={!plyCount || activePly === 0} onClick={() => reviewMove(activePly - 1)}><ChevronLeft size={17} /></IconButton><IconButton label="Next move" disabled={!isReview} onClick={() => reviewMove(activePly + 1)}><ChevronRight size={17} /></IconButton><IconButton label="Latest position" disabled={!isReview} onClick={() => setReviewPly(null)}><ChevronsRight size={17} /></IconButton></div></div></div>
-            </> : <>{settingsContent()}<div className="settings-back"><button className="secondary-button" onClick={() => setPanelTab('game')}><ArrowLeft size={16} />Back to the game</button></div></>}
-          </div>
-        </aside>
-      </div>
+        {mode === 'online' && <section className="connection-panel"><div className="panel-heading"><span><Users size={16} /> FRIEND CONNECTION</span></div><p className="connection-state">{phase === 'open' ? 'Connected. Health and attacks stay in sync.' : phase === 'idle' ? 'Create an invite or enter a friend’s code.' : phase === 'failed' || phase === 'closed' ? 'The connection is not active.' : 'Wait for your friend. Keep this page open.'}</p>{code && <strong className="invite-code">{formatRoomCode(code)}</strong>}{invite && <><label className="difficulty-field">{linkRef.current?.role === 'guest' ? 'Send this reply to the host' : 'Share this invite'}<input aria-label="Invite link" readOnly value={invite} onFocus={event => event.target.select()} /></label><button className="secondary-button" onClick={() => { void copyInvite() }}><Copy size={14} />Copy</button></>}{phase !== 'open' && <><div className="invite-actions"><button className="primary-button" onClick={() => { void host() }}>Create invite</button><button className="secondary-button" onClick={() => { void host(true) }}>Manual invite</button></div><form onSubmit={event => { event.preventDefault(); void join(joinInput) }}><label className="difficulty-field">Join a friend<input className="code-input" aria-label="Friend code or link" placeholder="Paste a code or link" value={joinInput} onChange={event => setJoinInput(event.target.value)} /></label><button className="secondary-button" type="submit">Join game</button></form>{linkRef.current?.role === 'host' && !code && invite && <form onSubmit={event => { event.preventDefault(); void acceptAnswer(linkRef.current as PvpLink, replyInput).catch(() => setError('This reply is not valid.')) }}><label className="difficulty-field">Friend’s reply<input aria-label="Friend reply" value={replyInput} onChange={event => setReplyInput(event.target.value)} /></label><button type="submit" className="secondary-button">Connect</button></form>}</>}{error && <p role="alert" className="error-message">{error}</p>}</section>}
+        <section className="inspector-panel"><div className="panel-heading"><span><Crosshair size={16} /> PIECE INTEL</span><span>{selected ?? 'SELECT A PIECE'}</span></div>{selectedPiece ? <><div className="selected-unit"><span className="unit-portrait"><ChessPiece type={selectedPiece.type} color={selectedPiece.color} /></span><div><span className="eyebrow">{side(selectedPiece.color)} · {selected}</span><h2>{UNIT_STATS[selectedPiece.type].name}</h2><small>{selectedPiece.hp <= UNIT_STATS[selectedPiece.type].health * 0.3 ? 'Critical health. Protect this piece.' : selectedPiece.hp < UNIT_STATS[selectedPiece.type].health ? 'Wounded. Damage stays between turns.' : 'At full health.'}</small></div></div><div className="unit-hp-label"><span><Heart size={13} /> HEALTH</span><strong>{selectedPiece.hp}<small> / {UNIT_STATS[selectedPiece.type].health}</small></strong></div><div className="wide-health"><span style={{ width: `${selectedPiece.hp / UNIT_STATS[selectedPiece.type].health * 100}%` }} /></div><div className="unit-stats"><div><strong>{UNIT_STATS[selectedPiece.type].damage}</strong><small>BASE DAMAGE</small></div><div><strong>{UNIT_STATS[selectedPiece.type].weaponName}</strong><small>WEAPON</small></div><div><strong>+{SUPPORT_BONUS}<small>%</small></strong><small>PER SUPPORTER</small></div></div><p className="inspector-hint">{selectedPiece.type === 'n' ? 'L-shaped lance charges jump over other pieces.' : selectedPiece.type === 'p' ? 'Spear strikes one square diagonally forward, like a chess capture.' : selectedPiece.type === 'k' ? 'Sword strikes any adjacent square.' : 'Attacks follow this piece’s movement lines. Damage drops 15% per extra square. Pieces block the path.'} Each ally that also covers the target adds {SUPPORT_BONUS}% damage.</p><div className="target-list">{attacks.length ? attacks.map(action => <button className={`target-row ${hovered === action.to ? 'is-hovered' : ''}`} key={action.to} disabled={locked} onMouseEnter={() => setHovered(action.to)} onMouseLeave={() => setHovered(null)} onClick={() => chooseSquare(action.to)}><span className="target-square">{action.to}</span><span className="target-copy"><strong>{action.target ? UNIT_STATS[action.target].name : 'Target'}{action.lethal && <span className="target-lethal">LETHAL</span>}</strong><small>{action.distance} sq away · {action.falloff}% reduction{action.support ? ` · +${action.support} support` : ''}</small></span><span className="target-damage">−{action.damage}</span></button>) : <p className="inspector-hint">No targets in range. Move into a better position.</p>}</div>{targetAction && <p className="inspector-hint">{targetAction.lethal ? 'This attack defeats the target and takes its square.' : `This attack leaves ${Math.max(0, (targetAction.targetHp ?? 0) - targetAction.damage)} HP. Neither piece moves.`}</p>}</> : <div className="inspector-empty"><Target size={30} /><strong>Know your next attack.</strong><p>Select one of your pieces to inspect its health, damage, and targets.</p><div className="unit-stats"><div><Heart size={18} /><small>PERSISTENT HP</small></div><div><Crosshair size={18} /><small>RANGE MATTERS</small></div><div><Shield size={18} /><small>NO RANDOM ROLLS</small></div></div></div>}
+        </section>
+        <section className="log-panel"><div className="panel-heading"><span><History size={16} /> BATTLE LOG</span><button className="nav-button" aria-label="Export battle" title="Export the full battle with health" onClick={download}><ArrowDownToLine size={15} /></button></div>{actions.length ? <ol className="combat-log">{[...actions].reverse().map((action, index) => <li className="log-item" key={action.ply}><span className="log-number">{String(action.ply).padStart(2, '0')}</span><button className="log-copy" onClick={() => { if (!animation) { setReview(session.states.length - 1 - index); setSelected(null) } }}><strong>{describeAction(action)}</strong><small>{side(action.color)} · {action.kind === 'attack' ? `${UNIT_STATS[action.piece].weaponName} · ${action.damage} damage · ${action.distance} sq${action.support ? ` · +${action.support} support` : ''}` : 'Position changed'}</small></button><span className={`log-tag ${action.kind === 'attack' ? action.lethal ? 'kill' : 'attack' : 'move'}`}>{action.kind === 'attack' ? action.lethal ? 'KILL' : 'HIT' : 'MOVE'}</span></li>)}</ol> : <div className="log-empty"><Swords size={24} /><p>The first move starts the story.</p><small>Every attack and capture appears here.</small></div>}<div className="invite-actions"><button className="nav-button" aria-label="First position" disabled={Boolean(animation) || session.states.length < 2} onClick={() => { setReview(0); setSelected(null) }}><ArrowLeft size={15} /></button><button className="nav-button" aria-label="Previous action" disabled={Boolean(animation) || (review ?? session.states.length - 1) <= 0} onClick={() => { setReview(Math.max(0, (review ?? session.states.length - 1) - 1)); setSelected(null) }}><ChevronLeft size={16} /></button><span className="eyebrow">{reviewing ? 'REVIEW' : 'LIVE BATTLE'}</span><button className="nav-button" aria-label="Next action" disabled={Boolean(animation) || !reviewing} onClick={() => setReview(current => current !== null && current < session.states.length - 2 ? current + 1 : null)}><ChevronRight size={16} /></button><button className="nav-button" aria-label="Latest position" disabled={Boolean(animation) || !reviewing} onClick={() => setReview(null)}><ArrowRight size={15} /></button></div></section>
+      </aside>
     </main>
-
-    {toast && <div className="toast" role="status"><Check size={17} />{toast}</div>}
-    {(modal || promotion) && <div className="modal-backdrop" onClick={event => { if (event.target === event.currentTarget) { setModal(null); setPromotion(null) } }}><div className={`modal ${modal === 'learn' ? 'learn-modal' : ''} ${modal === 'archive' ? 'archive-modal' : ''}`} ref={modalRef} role="dialog" aria-modal="true" aria-labelledby="modal-title"><IconButton label="Close dialog" className="modal-close" onClick={() => { setModal(null); setPromotion(null) }}><X size={20} /></IconButton>
-      {promotion ? <><h2 id="modal-title">Choose your new piece.</h2><p>Choose the piece for a successful promotion.</p><div className="promotion-options">{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(type => <button key={type} onClick={() => commitMove({ ...promotion, promotion: type })} aria-label={`Promote to ${NAMES[type].toLowerCase()}`}><ChessPiece type={type} color={activeColor} /><span>{NAMES[type]}</span></button>)}</div></> : modal === 'new' ? <><h2 id="modal-title">A new game. All possibility.</h2><p>{history.length && !finished ? 'This will replace your current game.' : 'Settle in. The board is yours.'}</p><div className="new-game-settings">{modeOptions()}<label>Play as</label><div className="color-options"><button className={newColor === 'w' ? 'chosen' : ''} onClick={() => setNewColor('w')}><ChessPiece type="k" color="w" /><span>White</span>{newColor === 'w' && <Check size={13} />}</button><button className={newColor === 'b' ? 'chosen' : ''} onClick={() => setNewColor('b')}><ChessPiece type="k" color="b" /><span>Black</span>{newColor === 'b' && <Check size={13} />}</button><button className={newColor === 'random' ? 'chosen' : ''} onClick={() => setNewColor('random')}><Sparkles size={25} /><span>Surprise me</span>{newColor === 'random' && <Check size={13} />}</button></div>{newMode === 'computer' && <><label htmlFor="new-difficulty">Your challenge</label><div className="form-select"><select id="new-difficulty" value={newLevel} onChange={event => setNewLevel(Number(event.target.value))}>{LEVELS.map((item, index) => <option key={item.name} value={index + 1}>{item.name} — Level {index + 1}</option>)}</select><ChevronDown size={16} /></div></>}<label htmlFor="time-control">Time control</label><div className="form-select"><select id="time-control" value={newTimed ? '10' : 'none'} onChange={event => setNewTimed(event.target.value === '10')}><option value="10">10 minutes · A little focus</option><option value="none">No clock · Take your time</option></select><Clock3 size={16} /></div></div>{newGameFooter()}</> : modal === 'join' ? joinContent() : modal === 'link' ? linkContent() : modal === 'resign' ? <><h2 id="modal-title">Call it a good game?</h2>{mode === 'computer' ? <p>If you resign, the computer wins this game.<br />There is always another board, another chance.</p> : <p>If you resign, your friend wins this game.</p>}<div className="modal-button-row"><button className="secondary-button" onClick={() => setModal(null)}>Keep playing</button><button className="primary-button" onClick={confirmResign}>Resign game</button></div></> : modal === 'result' ? <><h2 id="modal-title">{resultTitle}</h2><p>{resultDetail}</p><div className="result-stats"><div><strong>{Math.ceil(plyCount / 2)}</strong><span>moves played</span></div><div><strong>{opponentLabel}</strong><span>your opponent</span></div></div><button className="primary-button" onClick={() => openNewGame(mode)}><Plus size={18} />Another game<ArrowRight size={18} /></button><button className="text-button" onClick={() => setModal(null)}>Take a look at the board</button></> : modal === 'preferences' ? <><h2 id="modal-title">The little details.</h2>{settingsContent()}</> : modal === 'learn' ? <><h2 id="modal-title">A simple game. Endless depth.</h2><p>Select a piece, then select a destination. You can also drag pieces.</p><p>Your goal: put the other king in check, with no legal escape. That is checkmate.</p><div className="piece-guide">{([
-        ['k', 'The King', 'One square in any direction. Keep your king safe.'],
-        ['q', 'The Queen', 'Any distance in a straight line, in any direction.'],
-        ['r', 'The Rook', 'Any distance along a rank or file.'],
-        ['b', 'The Bishop', 'Any distance on a diagonal.'],
-        ['n', 'The Knight', 'Two squares, then one to the side. It can jump over pieces.'],
-        ['p', 'The Pawn', 'One square forward, two on its first move. Captures one square diagonally.'],
-      ] as [PieceSymbol, string, string][]).map(([type, name, description]) => <div key={type}><span><ChessPiece type={type} color="w" /></span><h3>{name}</h3><p>{description}</p></div>)}</div><div className="special-rules"><details open><summary>Probabilistic captures<ChevronDown size={16} /></summary><p>Each legal capture starts with a 70% chance. Piece strength and tactical support change this chance.</p><p><strong>Strength:</strong> Pawn 1, knight 3, bishop 3, rook 5, queen 9, king 4. Each strength point of advantage adds 3 percentage points, with a limit of 15.</p><p><strong>Support:</strong> Each extra ally that attacks the destination adds 8 percentage points. Each piece that protects the defender subtracts 8. The total support change has a limit of 16 points.</p><p>The chance stays between 40% and 95%. A uniform random roll below the chance succeeds. The roll uses the same rules for both players.</p><p>A failed capture keeps both pieces in place and uses the turn. En passant also uses these odds. Promotion occurs only after success.</p><p><strong>Check:</strong> A failed capture from check loses the game. Moves without a capture follow normal chess rules.</p><p>For en passant, protection refers to the captured pawn’s square. Support uses geometric attacks, which include pinned pieces.</p></details><details><summary>Three special moves<ChevronDown size={16} /></summary><p><strong>Castling:</strong> Move your king two squares toward a rook to move both pieces. Neither piece can have moved. The king cannot cross an attacked square.</p><p><strong>En passant:</strong> When a pawn advances two squares beside your pawn, you can capture it as if it moved one square. This is only possible on the next move.</p><p><strong>Promotion:</strong> A pawn that reaches the last rank becomes a queen, rook, bishop, or knight.</p></details><details><summary>A good place to start<Lightbulb size={16} /></summary><p>Control the center with your pawns. Develop your knights and bishops. Castle to protect your king. Before every move, look for threats.</p></details></div><button className="primary-button" onClick={() => setModal(null)}>Back to the board<ArrowRight size={17} /></button></> : modal === 'archive' ? <><h2 id="modal-title">Your time at the board.</h2><p>Finished games stay here, on this device.</p>{archive.length ? <div className="archive-list">{archive.map(item => <div className="archive-item" key={item.id}><span className="archive-game-icon"><Swords size={22} /></span><div><strong>{item.title}</strong><span>{new Date(item.date).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · {item.moves} moves · {item.mode && item.mode !== 'computer' ? 'Friend' : LEVELS[item.level - 1].name}</span></div><IconButton label="Download saved game" onClick={() => downloadPgn(item.pgn, item.id)}><ArrowDownToLine size={18} /></IconButton></div>)}</div> : <div className="archive-empty"><ChessPiece type="n" color="w" /><h3>Your story starts with a game.</h3><p>Finish your first game to add it to your collection.</p></div>}<button className="primary-button" onClick={() => setModal(null)}>Back to your game<ArrowRight size={18} /></button></> : null}
-    </div></div>}
+    <footer className="battle-footer"><span className="footer-note"><Heart size={13} /> No cards. No dice. Every hit counts.</span><button className="text-button" onClick={() => setModal('rules')}>How health chess works <ArrowRight size={14} /></button></footer>
+    {notice && <div className="result-banner" role="status"><p>{notice}</p><button className="text-button" onClick={() => setNotice('')}>Dismiss</button></div>}
+    {(modal || promotion) && <div className="modal-shade" onMouseDown={event => { if (event.target === event.currentTarget) { setModal(null); setPromotion(null) } }}><section className="battle-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title" ref={modalRef}><button className="modal-close nav-button" aria-label="Close dialog" onClick={() => { setModal(null); setPromotion(null) }}><X size={21} /></button><span className="eyebrow">CHESS BUT REAL · HEALTH EDITION</span><h2 id="modal-title">{modalTitle}</h2>
+      {promotion ? <><p>Promotion keeps the same percentage of health.</p><div className="rule-grid">{(['q', 'r', 'b', 'n'] as PieceSymbol[]).map(type => <button className="rule-unit" key={type} aria-label={`Promote to ${UNIT_STATS[type].name.toLowerCase()}`} onClick={() => execute({ ...promotion, promotion: type })}><span className="rule-piece"><ChessPiece type={type} color={state.turn} /></span><strong>{UNIT_STATS[type].name}</strong></button>)}</div></> : modal === 'rules' ? <>
+        <p>Each piece has health and attack damage. Each turn permits one move or one attack.</p><div className="rule-callout"><Swords size={22} /><p><strong>Damage first. Capture last.</strong> A nonlethal attack leaves both pieces in place. At zero health, the target dies and the attacker takes its square.</p></div>
+        <div className="rule-grid">{TYPES.map(type => <div className="rule-unit" key={type}><span className="rule-piece"><ChessPiece type={type} color="w" /></span><div><strong>{UNIT_STATS[type].name}</strong><div className="rule-stats"><span><Heart size={12} />{UNIT_STATS[type].health} HP</span><span><Swords size={12} />{UNIT_STATS[type].damage} DMG</span><span><Crosshair size={12} />{UNIT_STATS[type].weaponName}</span></div></div></div>)}</div>
+        <h3>Attacks follow chess captures.</h3><p>A piece can attack any square it could capture in normal chess. Pawns strike one square diagonally forward. Knights jump. Kings strike adjacent squares.</p><p>Rooks, bishops, and queens attack along their full lines. Any piece in the path blocks the attack.</p><h3>Distance changes the damage.</h3><p>Count the larger horizontal or vertical distance. Each square after the first reduces base damage by 15 percentage points.</p><p>Damage never falls below 35% of base damage. A rook deals 70 damage at one square, 60 at two, and 28 at five.</p><h3>Support makes attacks stronger.</h3><p>Each ally that could also attack the target adds {SUPPORT_BONUS}% of base damage. Two supporters add {SUPPORT_BONUS * 2}%, three add {SUPPORT_BONUS * 3}%, and so on.</p><p>Supporters must have a clear line to the target. The preview shows the final damage and the number of supporters.</p><h3>Every piece has a weapon.</h3><div className="rule-grid">{TYPES.map(type => <div className="rule-unit" key={type}><span className="rule-piece"><ChessPiece type={type} color="w" /></span><div><strong>{UNIT_STATS[type].weaponName}</strong><div className="rule-stats"><span>{UNIT_STATS[type].name}</span></div></div></div>)}</div><p>Moves use normal chess patterns. Castling requires an unmoved king, an unmoved rook, and a clear path.</p><p>Promotion preserves the percentage of health. Damage does not heal between turns. There are no random rolls.</p><div className="rule-callout"><Shield size={22} /><p><strong>Defeat the king.</strong> A king has 300 HP. There is no check or checkmate. Reduce the enemy king to zero HP to win.</p></div><p>The battle is a draw after 100 turns without an attack or pawn move, or when the active side has no action.</p>
+      </> : modal === 'settings' ? <div className="settings-list"><label className="toggle-row"><span>Move and damage hints</span><input type="checkbox" checked={settings.hints} onChange={event => setSettings(current => ({ ...current, hints: event.target.checked }))} /></label><label className="toggle-row"><span>Attack sounds</span><input type="checkbox" checked={settings.sound} onChange={event => setSettings(current => ({ ...current, sound: event.target.checked }))} /></label><label className="difficulty-field">Board theme<select value={settings.theme} onChange={event => setSettings(current => ({ ...current, theme: event.target.value as Settings['theme'] }))}><option value="mono">Graphite</option><option value="sage">Sage</option><option value="walnut">Walnut</option><option value="slate">Slate</option></select></label><p>The game follows your device’s reduced-motion setting.</p></div> : modal === 'resign' ? <><p>Your opponent wins if you resign.</p><div className="invite-actions"><button className="danger-button" onClick={resign}><Flag size={15} />Resign</button><button className="secondary-button" onClick={() => setModal(null)}>Keep playing</button></div></> : modal === 'archive' ? <><p>Recent battles include the exact health of every piece.</p>{archive.length ? archive.map(item => <button className="target-row" key={item.id} onClick={() => { closeLink(); cancelAnimation(); setSession(item); sessionRef.current = item; setMode('local'); setPlayerColor('w'); setReview(item.states.length - 1); setModal(null) }}><span className="target-square"><History size={16} /></span><span className="target-copy"><strong>Battle {item.id.slice(0, 8)}</strong><small>{latest(item).ply} actions · {latest(item).winner ? `${side(latest(item).winner!)} won` : item.resigned ? `${side(other(item.resigned))} won` : 'In progress'}</small></span><ArrowRight size={16} /></button>) : <div className="log-empty"><History size={25} /><p>Your completed and replaced battles appear here.</p></div>}</> : <><p>One action per turn. Persistent health. Every square matters.</p><div className="mode-tabs" role="group" aria-label="New game opponent">{(['computer', 'local', 'online'] as Mode[]).map(item => <button key={item} className={newMode === item ? 'active' : ''} aria-pressed={newMode === item} onClick={() => setNewMode(item)}>{item === 'computer' ? 'Computer' : item === 'local' ? 'Local friend' : 'Online friend'}</button>)}</div><label className="difficulty-field">Your army<select aria-label="Play as" value={newColor} onChange={event => setNewColor(event.target.value as Color)}><option value="w">White · acts first</option><option value="b">Black · acts second</option></select></label>{newMode === 'computer' && <label className="difficulty-field">Your challenge<select aria-label="Your challenge" value={level} onChange={event => setLevel(Number(event.target.value))}>{LEVELS.map((name, index) => <option value={index + 1} key={name}>{name} · Level {index + 1}</option>)}</select></label>}<div className="rule-callout"><Heart size={21} /><p>The target stays on the board until its health reaches zero. Plan several attacks ahead.</p></div><button className="primary-button" onClick={() => { if (newMode === 'online') { void host(); return } closeLink(); reset(newMode, newColor) }}>{newMode === 'online' ? <Users size={16} /> : <Swords size={16} />}{newMode === 'online' ? 'Create invite link' : 'Start battle'}</button>{newMode === 'online' && <form onSubmit={event => { event.preventDefault(); void join(joinInput) }}><label className="difficulty-field">Or join a friend<input aria-label="Friend code or link" value={joinInput} onChange={event => setJoinInput(event.target.value)} placeholder="Paste a code or link" /></label><button className="secondary-button" type="submit">Join game</button></form>}</>}
+      {!promotion && modal !== 'new' && <button className="secondary-button" onClick={() => setModal(null)}><Check size={15} />Back to the battle</button>}
+    </section></div>}
   </div>
 }
 

@@ -1,4 +1,6 @@
 import type { Color } from 'chess.js'
+import { CARDS } from './tactics'
+import type { CardId } from './tactics'
 
 export type PlayMode = 'computer' | 'online'
 export type LinkPhase = 'gathering' | 'wait-reply' | 'wait-host' | 'connecting' | 'open' | 'failed' | 'closed'
@@ -10,9 +12,13 @@ export type OfferMeta = {
 }
 
 export type PvpMessage =
+  | { type: 'battle-start'; version: 2; gameId: string; hostColor: Color }
+  | { type: 'battle-action'; version: 2; gameId: string; ply: number; from: string; to: string; promotion?: string; before: string }
+  | { type: 'battle-resign'; version: 2; gameId: string; ply: number; color: Color }
   | { type: 'hello'; color: Color; timed: boolean; gameId: string }
   | { type: 'ready' }
-  | { type: 'move'; from: string; to: string; promotion?: string; before?: string; roll?: number; fen?: string; pgn?: string; seconds?: { w: number; b: number } }
+  | { type: 'move'; from: string; to: string; promotion?: string; before?: string; roll?: number; fen?: string; pgn?: string; seconds?: { w: number; b: number }; command?: { w: number; b: number } }
+  | { type: 'card'; card: CardId; targets: string[]; before?: string; command?: { w: number; b: number } }
   | { type: 'resign'; color: Color }
   | { type: 'timeout'; color: Color }
   | { type: 'draw'; accept?: boolean }
@@ -72,11 +78,42 @@ export async function decodeSignal(input: string): Promise<Signal> {
 export function parseMessage(data: string): PvpMessage | null {
   try {
     const message = JSON.parse(data) as PvpMessage
+    if (message.type === 'battle-start' || message.type === 'battle-action' || message.type === 'battle-resign') {
+      if (message.version !== 2 || !isGameId(message.gameId)) return null
+      if (message.type === 'battle-start') {
+        return isColor(message.hostColor)
+          ? { type: message.type, version: message.version, gameId: message.gameId, hostColor: message.hostColor }
+          : null
+      }
+      if (!Number.isSafeInteger(message.ply) || message.ply < 0) return null
+      if (message.type === 'battle-resign') {
+        return isColor(message.color)
+          ? { type: message.type, version: message.version, gameId: message.gameId, ply: message.ply, color: message.color }
+          : null
+      }
+      if (!isSquare(message.from) || !isSquare(message.to) || !isPromotion(message.promotion)
+        || typeof message.before !== 'string' || message.before.length >= 30000) return null
+      return {
+        type: message.type,
+        version: message.version,
+        gameId: message.gameId,
+        ply: message.ply,
+        from: message.from,
+        to: message.to,
+        ...(message.promotion === undefined ? {} : { promotion: message.promotion }),
+        before: message.before,
+      }
+    }
     if (message.type === 'hello' && isColor(message.color) && typeof message.timed === 'boolean' && typeof message.gameId === 'string') return message
     if (message.type === 'ready') return message
     if (message.type === 'move' && isSquare(message.from) && isSquare(message.to) && isPromotion(message.promotion)
       && (message.before === undefined || typeof message.before === 'string')
+      && isCommand(message.command)
       && (message.roll === undefined || (typeof message.roll === 'number' && Number.isFinite(message.roll) && message.roll >= 0 && message.roll < 1))) return message
+    if (message.type === 'card' && isCard(message.card) && Array.isArray(message.targets)
+      && message.targets.length > 0 && message.targets.length <= 2 && message.targets.every(isSquare)
+      && (message.before === undefined || typeof message.before === 'string')
+      && isCommand(message.command)) return message
     if ((message.type === 'resign' || message.type === 'timeout') && isColor(message.color)) return message
     if (message.type === 'draw' && (message.accept === undefined || typeof message.accept === 'boolean')) return message
     if (message.type === 'undo' && (message.accept === undefined || typeof message.accept === 'boolean')) return message
@@ -232,12 +269,27 @@ function isColor(value: unknown): value is Color {
   return value === 'w' || value === 'b'
 }
 
+function isGameId(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128
+}
+
 function isSquare(value: unknown) {
   return typeof value === 'string' && /^[a-h][1-8]$/.test(value)
 }
 
 function isPromotion(value: unknown) {
   return value === undefined || value === 'q' || value === 'r' || value === 'b' || value === 'n'
+}
+
+function isCard(value: unknown): value is CardId {
+  return typeof value === 'string' && value in CARDS
+}
+
+function isCommand(value: unknown) {
+  if (value === undefined) return true
+  if (typeof value !== 'object' || value === null) return false
+  const command = value as { w?: unknown; b?: unknown }
+  return [command.w, command.b].every((entry) => typeof entry === 'number' && Number.isFinite(entry) && entry >= 0 && entry <= 10)
 }
 
 function base64url(bytes: Uint8Array) {
