@@ -146,6 +146,10 @@ strong {
 }
 
 .battle-app {
+  --arena-width: clamp(560px, calc(100dvh - 260px), 800px);
+  --sidebar-width: 260px;
+  --layout-gap: 24px;
+  --layout-width: calc(var(--arena-width) + var(--sidebar-width) + var(--layout-gap));
   min-height: 100dvh;
   background: radial-gradient(ellipse at 35% 5%, #9ae2bf05, transparent 55%), var(--bg);
   color: var(--text);
@@ -161,7 +165,7 @@ strong {
   align-items: center;
   gap: 24px;
   width: calc(100% - 64px);
-  max-width: 1120px;
+  max-width: var(--layout-width);
   min-height: 80px;
   margin-inline: auto;
 }
@@ -197,17 +201,6 @@ strong {
   font-weight: 450;
 }
 
-.mode-label {
-  padding: 5px 9px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.15em;
-  white-space: nowrap;
-}
-
 .header-nav {
   display: flex;
   align-items: center;
@@ -238,14 +231,13 @@ strong {
 }
 
 .battle-layout {
-  --arena-width: min(640px, max(400px, calc(100dvh - 470px)));
   display: grid;
-  grid-template-columns: minmax(0, var(--arena-width)) 340px;
+  grid-template-columns: minmax(0, 1fr) var(--sidebar-width);
   align-items: start;
-  gap: 32px;
+  gap: var(--layout-gap);
   width: calc(100% - 64px);
-  max-width: calc(var(--arena-width) + 372px);
-  margin: 32px auto 0;
+  max-width: var(--layout-width);
+  margin: 24px auto 0;
   padding-bottom: 32px;
 }
 
@@ -257,14 +249,10 @@ strong {
 .arena-heading {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px 16px;
-  margin-bottom: 22px;
-}
-
-.arena-heading > div {
-  min-width: 0;
+  margin-bottom: 12px;
 }
 
 .eyebrow {
@@ -276,20 +264,6 @@ strong {
   letter-spacing: 0.19em;
   line-height: 1.6;
   text-transform: uppercase;
-}
-
-.arena-heading h1 {
-  font-size: clamp(26px, 2.6vw, 34px);
-  font-weight: 650;
-  letter-spacing: -1.25px;
-  line-height: 1.2;
-}
-
-.arena-heading p {
-  margin-top: 7px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
 }
 
 .round-pill {
@@ -443,8 +417,8 @@ strong {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) 20px;
-  width: min(100%, max(400px, calc(100dvh - 470px)));
-  max-width: 640px;
+  width: 100%;
+  max-width: 800px;
   padding: 7px 7px 0 0;
   border: 1px solid var(--border-strong);
   border-radius: 9px;
@@ -1152,7 +1126,7 @@ strong {
 .log-panel,
 .connection-panel {
   min-width: 0;
-  padding: 19px;
+  padding: 16px;
   border: 1px solid var(--border);
   border-radius: 11px;
   background: linear-gradient(145deg, #ffffff02, transparent 60%), var(--surface);
@@ -1756,6 +1730,19 @@ select option {
   font-size: 9px;
 }
 
+.footer-link {
+  color: var(--muted);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+  transition: color 160ms ease, text-decoration-color 160ms ease;
+}
+
+.footer-link:hover {
+  color: var(--mint);
+  text-decoration-color: var(--mint);
+}
+
 .footer-note svg {
   width: 13px;
   height: 13px;
@@ -2110,7 +2097,7 @@ select option {
   color: var(--text);
   font-size: 10px;
   font-weight: 650;
-  letter-spacing: 0.05em;
+  letter-spacing: 0;
 }
 
 .panel-heading > .nav-button {
@@ -2165,8 +2152,8 @@ select option {
 }
 
 .battle-app > .battle-footer {
-  width: calc(100% - 32px);
-  max-width: 1012px;
+  width: calc(100% - 64px);
+  max-width: var(--layout-width);
   margin: 0 auto;
   padding-bottom: max(20px, env(safe-area-inset-bottom));
 }
@@ -2568,31 +2555,32 @@ strong.invite-code {
 }
 
 @media (max-width: 1000px) {
+  .battle-app {
+    --sidebar-width: 240px;
+    --layout-gap: 20px;
+  }
+
   .header-inner {
     gap: 16px;
-  }
-
-  .battle-layout {
-    gap: 24px;
-    max-width: calc(var(--arena-width) + 364px);
-  }
-
-  .mode-label {
-    display: none;
   }
 }
 
 @media (max-width: 900px) {
+  .battle-app {
+    --layout-width: 640px;
+  }
+
+  .header-inner,
+  .battle-app > .battle-footer {
+    width: calc(100% - 32px);
+  }
+
   .battle-layout {
     grid-template-columns: minmax(0, 1fr);
     gap: 24px;
     width: calc(100% - 32px);
     max-width: 640px;
     margin-top: 26px;
-  }
-
-  .board-shell {
-    width: 100%;
   }
 
   .battle-sidebar {
@@ -2608,10 +2596,6 @@ strong.invite-code {
 
   .combat-log {
     max-height: 240px;
-  }
-
-  .arena-heading h1 {
-    font-size: 32px;
   }
 }
 
@@ -2671,20 +2655,6 @@ strong.invite-code {
     gap: 22px;
     margin-top: 23px;
     padding-bottom: max(24px, env(safe-area-inset-bottom));
-  }
-
-  .arena-heading {
-    gap: 8px 10px;
-    margin-bottom: 19px;
-  }
-
-  .arena-heading h1 {
-    font-size: 29px;
-    letter-spacing: -1px;
-  }
-
-  .arena-heading p {
-    font-size: 11px;
   }
 
   .round-pill {
@@ -2872,10 +2842,6 @@ strong.invite-code {
 
   .header-inner > .mobile-label {
     display: none;
-  }
-
-  .arena-heading h1 {
-    font-size: 26px;
   }
 
   .player-bar {

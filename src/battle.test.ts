@@ -55,9 +55,9 @@ describe('battle setup and serialization', () => {
     expect(UNIT_STATS).toEqual({
       p: { name: 'Pawn', health: 100, damage: 35, range: 1, weapon: 'spear', weaponName: 'Spear' },
       n: { name: 'Knight', health: 180, damage: 65, range: 2, weapon: 'lance', weaponName: 'Lance' },
-      b: { name: 'Bishop', health: 140, damage: 55, range: 7, weapon: 'bolt', weaponName: 'Arcane bolt' },
+      b: { name: 'Bishop', health: 140, damage: 55, range: 7, weapon: 'bolt', weaponName: 'Bolt' },
       r: { name: 'Rook', health: 240, damage: 70, range: 7, weapon: 'cannon', weaponName: 'Cannon' },
-      q: { name: 'Queen', health: 220, damage: 80, range: 7, weapon: 'beam', weaponName: 'Royal beam' },
+      q: { name: 'Queen', health: 220, damage: 80, range: 7, weapon: 'beam', weaponName: 'Beam' },
       k: { name: 'King', health: 300, damage: 60, range: 1, weapon: 'sword', weaponName: 'Sword' },
     })
   })

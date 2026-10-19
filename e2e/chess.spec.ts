@@ -104,6 +104,17 @@ async function expectNoCards(page: Page) {
   await expect(page.getByRole('button', { name: /play card|draw card|use card|command point|tactic/i })).toHaveCount(0)
 }
 
+async function expectMinimalCopy(page: Page) {
+  const removedCopy = /health\s+chess|health\s+edition|no cards|no dice|every hit counts|damage first|capture last|the battlefield|chess\. with a pulse|wear them down|every square matters|piece intel|friend connection|know your next attack|the first move starts the story|persistent hp|range matters|vs computer|local duel|online duel|\bbattle\b|\barm(?:y|ies)\b/i
+  await expect(page.locator('body')).not.toContainText(removedCopy)
+  const ariaText = await page.locator('[aria-label], [aria-description], [title]').evaluateAll(items => items.flatMap(item => [
+    item.getAttribute('aria-label'),
+    item.getAttribute('aria-description'),
+    item.getAttribute('title'),
+  ]).join('\n'))
+  expect(ariaText).not.toMatch(removedCopy)
+}
+
 test.beforeEach(async ({ page }) => {
   await seedBattle(page)
 })
@@ -111,14 +122,21 @@ test.beforeEach(async ({ page }) => {
 test('Chess Royale loads assets, moves, and exports from its deployment path @pages', async ({ page, baseURL, request }) => {
   const base = new URL(baseURL!)
   await expect(page).toHaveURL(base.href)
-  await expect(page).toHaveTitle('Chess Royale — Every hit counts.')
+  await expect(page).toHaveTitle('Chess Royale')
   const brand = page.getByRole('button', { name: 'Chess Royale home', exact: true })
   await expect(brand).toBeVisible()
   await expect(brand).toHaveText('Chess Royale')
+  const footerLink = page.locator('.battle-footer').getByRole('link', { name: 'built with agent duel', exact: true })
+  await expect(footerLink).toBeVisible()
+  await expect(footerLink).toHaveAttribute('href', 'https://github.com/bottomless/agent-duel')
+  await expect(page.getByRole('region', { name: 'Chess game', exact: true })).toBeVisible()
+  await expect(page.locator('.battle-footer').getByRole('button', { name: 'Rules', exact: true })).toBeVisible()
+  await expectMinimalCopy(page)
   await brand.click()
-  const dialog = page.getByRole('dialog', { name: 'A new kind of chess.' })
+  const dialog = page.getByRole('dialog', { name: 'New game' })
   await expect(dialog).toBeVisible()
-  await expect(dialog.locator('.eyebrow')).toHaveText('CHESS ROYALE · HEALTH EDITION')
+  await expect(dialog.locator('.eyebrow')).toHaveCount(0)
+  await expectMinimalCopy(page)
   await dialog.getByRole('button', { name: 'Close dialog', exact: true }).click()
 
   const scripts = await page.locator('script[type="module"][src]').evaluateAll(items => items.map(item => (item as HTMLScriptElement).src))
@@ -147,7 +165,7 @@ test('Chess Royale loads assets, moves, and exports from its deployment path @pa
   await expect(turn(page)).toHaveText('Black to act.')
   const saved = await savedBattle(page)
   const downloadStarted = page.waitForEvent('download')
-  await page.getByRole('button', { name: 'Export battle', exact: true }).click()
+  await page.getByRole('button', { name: 'Export game', exact: true }).click()
   const download = await downloadStarted
   expect(download.suggestedFilename()).toBe(`chess-royale-${saved.session.id.slice(0, 8)}.json`)
   expect(await download.failure()).toBeNull()
@@ -158,6 +176,34 @@ test('Chess Royale loads assets, moves, and exports from its deployment path @pa
   expect(JSON.parse(Buffer.concat(chunks).toString())).toEqual(saved)
 })
 
+test('the desktop board has more space than the sidebar @pages', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'Desktop layout')
+  await square(page, 'e2').click()
+  for (const [width, height, minimumBoardWidth] of [[1440, 1000, 700], [1366, 768, 520], [1920, 1080, 760], [1024, 768, 520], [1000, 800, 520], [901, 800, 520]]) {
+    await page.setViewportSize({ width, height })
+    const boardBounds = await board(page).boundingBox()
+    const sidebarBounds = await page.locator('.battle-sidebar').boundingBox()
+    expect(boardBounds).not.toBeNull()
+    expect(sidebarBounds).not.toBeNull()
+    expect(boardBounds!.width).toBeGreaterThanOrEqual(minimumBoardWidth)
+    expect(boardBounds!.width).toBeGreaterThan(sidebarBounds!.width * 2)
+    expect(sidebarBounds!.width).toBeLessThanOrEqual(260)
+    expect(sidebarBounds!.x).toBeGreaterThan(boardBounds!.x + boardBounds!.width)
+    expect(Math.abs(boardBounds!.width - boardBounds!.height)).toBeLessThan(1)
+    await expectNoOverflow(page)
+    await expectNoOverflow(page, page.locator('.battle-sidebar'))
+    expect(await page.locator('.control-panel, .inspector-panel, .log-panel, .unit-stats').evaluateAll(items => items.every(item => item.scrollWidth <= item.clientWidth + 1))).toBe(true)
+  }
+  for (const width of [900, 768, 600, 390, 320]) {
+    await page.setViewportSize({ width, height: 844 })
+    const boardBounds = await board(page).boundingBox()
+    const sidebarBounds = await page.locator('.battle-sidebar').boundingBox()
+    expect(sidebarBounds!.y).toBeGreaterThan(boardBounds!.y + boardBounds!.height)
+    await expectNoOverflow(page)
+    await expectNoOverflow(page, page.locator('.battle-sidebar'))
+  }
+})
+
 test('the initial board has 32 health bars and no command or tactic controls', async ({ page }) => {
   await expect(board(page).locator('.battle-square')).toHaveCount(64)
   await expect(board(page).locator('.piece-health-fill')).toHaveCount(32)
@@ -165,12 +211,27 @@ test('the initial board has 32 health bars and no command or tactic controls', a
   await expect(board(page).getByRole('button', { name: /, white / })).toHaveCount(16)
   await expect(board(page).getByRole('button', { name: /, black / })).toHaveCount(16)
   await expect(turn(page)).toHaveText('White to act.')
-  await expect(page.locator('.log-empty')).toContainText('The first move starts the story.')
+  await expect(page.locator('.log-empty')).toContainText('No moves yet.')
   await expect(log(page)).toHaveCount(0)
   await expect(page.getByRole('button', { name: 'Take back', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'First position', exact: true })).toBeDisabled()
   await expect(page.locator('.player-total strong')).toHaveText(['2,440', '2,440'])
+  await expect(page.locator('.player-total small')).toHaveText(['Total health', 'Total health'])
+  await expect(page.locator('.player-info strong')).toHaveText(['Black', 'WhiteON TURN'])
+  await expect(page.locator('.control-panel .panel-heading')).toHaveCount(0)
+  await expect(page.locator('.inspector-panel .panel-heading')).toHaveText('Piece details')
+  await expect(page.locator('.log-panel .panel-heading')).toHaveText('Move history')
+  await expect(page.locator('.log-panel .eyebrow')).toHaveText('Live')
+  await expectMinimalCopy(page)
   await expectNoCards(page)
+})
+
+test('the online panel uses a simple connection label', async ({ page }) => {
+  await seedBattle(page, createBattle(), { mode: 'online' })
+  await expect(page.locator('.connection-panel .panel-heading')).toHaveText('Connection')
+  await expect(page.locator('.control-panel .panel-heading')).toHaveCount(0)
+  await expect(turn(page)).toHaveText('Connect a friend to play.')
+  await expectMinimalCopy(page)
 })
 
 test('a selected pawn shows its health, stats, and legal moves', async ({ page }) => {
@@ -238,8 +299,8 @@ test('ranged hits persist damage before a lethal hit moves the rook', async ({ p
   await expect(square(page, 'a1')).toHaveAccessibleName('a1, empty')
   await expect(square(page, 'a4')).toHaveAccessibleName('a4, white rook, 240 of 240 health')
   await expect(board(page).locator('.piece-health')).toHaveCount(3)
-  await expect(page.locator('.combat-summary')).toContainText('Target defeated. The attacker takes its square.')
-  await expect(page.locator('.log-tag')).toHaveText(['KILL', 'MOVE', 'HIT', 'MOVE', 'HIT'])
+  await expect(page.locator('.combat-summary')).toContainText('Target captured. The attacker takes its square.')
+  await expect(page.locator('.log-tag')).toHaveText(['CAPTURE', 'MOVE', 'HIT', 'MOVE', 'HIT'])
   const saved = await savedBattle(page)
   await page.reload()
   await expectPosition(page, saved.session.states[5])
@@ -339,7 +400,7 @@ test('a lethal attack on the king ends the battle and locks the board', async ({
   expect(after.winner).toBe('w')
   expect(after.board.a4).toMatchObject({ type: 'r', color: 'w', hp: 240 })
   await expect(turn(page)).toHaveText('White wins.')
-  await expect(page.locator('.result-banner')).toContainText('White wins the battle.')
+  await expect(page.locator('.result-banner')).toContainText('White wins the game.')
   await expect(page.getByRole('button', { name: 'Resign', exact: true })).toBeDisabled()
   await expect(board(page).locator('[aria-disabled="true"]')).toHaveCount(64)
   await square(page, 'a4').dispatchEvent('click')
@@ -355,7 +416,7 @@ test('a damaged piece keeps its health after a move and reload', async ({ page }
   initial.board.a1!.hp = 83
   await seedBattle(page, initial)
   await square(page, 'a1').click()
-  await expect(page.locator('.inspector-panel')).toContainText('Wounded. Damage stays between turns.')
+  await expect(page.locator('.inspector-panel')).toContainText('Damage remains between turns.')
   await expect(page.locator('.unit-hp-label')).toContainText('83 / 240')
   await square(page, 'a1').click()
   const after = await act(page, 'a1', 'b1')
@@ -428,7 +489,7 @@ test('history review shows past health and returns to the unchanged live battle'
   await expectPosition(page, live)
   await page.getByRole('button', { name: 'Previous action', exact: true }).click()
   await expectPosition(page, hit)
-  await page.getByRole('button', { name: 'Return to the live battle', exact: true }).click()
+  await page.getByRole('button', { name: 'Return to game', exact: true }).click()
   await expectPosition(page, live)
   expect(await savedBattle(page)).toEqual(saved)
 })
@@ -439,9 +500,11 @@ test('queen promotion uses a modal and preserves the health ratio', async ({ pag
   await seedBattle(page, initial)
   await square(page, 'a7').click()
   await square(page, 'a8').click()
-  const dialog = page.getByRole('dialog', { name: 'Choose your new piece.' })
+  const dialog = page.getByRole('dialog', { name: 'Promotion' })
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('Promotion keeps the same percentage of health.')
+  await expect(dialog.locator('.eyebrow')).toHaveCount(0)
+  await expectMinimalCopy(page)
   await expect(dialog.getByRole('button', { name: /^Promote to / })).toHaveCount(4)
   expect(await liveState(page)).toEqual(initial)
   await page.keyboard.press('Escape')
@@ -480,6 +543,8 @@ test('the black perspective and board flip preserve health and square controls',
 
 test('the computer worker returns one legal action without fallback or cards @pages', async ({ page, baseURL }) => {
   await seedBattle(page, createBattle(), { mode: 'computer', level: 1 })
+  await expect(page.locator('.control-panel .panel-heading')).toHaveCount(0)
+  await expectMinimalCopy(page)
   await page.evaluate(() => {
     const probe: WorkerProbe = { responses: [], errors: [] }
     Object.assign(window, { workerProbe: probe })
@@ -530,16 +595,18 @@ test('the computer worker returns one legal action without fallback or cards @pa
 
 test('dialogs trap focus and Escape restores the opener', async ({ page }) => {
   const cases = [
-    { opener: page.getByRole('button', { name: 'Preferences', exact: true }), title: 'Make the board yours.' },
-    { opener: page.getByRole('button', { name: 'New game', exact: true }), title: 'A new kind of chess.' },
-    { opener: page.getByRole('button', { name: 'How to play', exact: true }), title: 'Every piece has a life.' },
-    { opener: page.getByRole('button', { name: 'My games', exact: true }), title: 'Your recent battles.' },
-    { opener: page.getByRole('button', { name: 'Resign', exact: true }), title: 'End this battle?' },
+    { opener: page.getByRole('button', { name: 'Preferences', exact: true }), title: 'Settings' },
+    { opener: page.getByRole('button', { name: 'New game', exact: true }), title: 'New game' },
+    { opener: page.getByRole('button', { name: 'How to play', exact: true }), title: 'Rules' },
+    { opener: page.getByRole('button', { name: 'My games', exact: true }), title: 'Recent games' },
+    { opener: page.getByRole('button', { name: 'Resign', exact: true }), title: 'Resign?' },
   ]
   for (const { opener, title } of cases) {
     await opener.click()
     const dialog = page.getByRole('dialog', { name: title })
     await expect(dialog).toHaveAttribute('aria-modal', 'true')
+    await expect(dialog.locator('.eyebrow')).toHaveCount(0)
+    await expectMinimalCopy(page)
     const items = dialog.locator('button:not(:disabled), input, select, [tabindex="0"]')
     await expect(items.first()).toBeFocused()
     await page.keyboard.press('Shift+Tab')
@@ -554,7 +621,7 @@ test('dialogs trap focus and Escape restores the opener', async ({ page }) => {
 
 test('the rules show all unit stats, weapons, support, and deterministic health rules', async ({ page }) => {
   await page.getByRole('button', { name: 'Read the rules', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Every piece has a life.' })
+  const dialog = page.getByRole('dialog', { name: 'Rules' })
   await expect(dialog.locator('.rule-unit')).toHaveCount(12)
   for (const stats of Object.values(UNIT_STATS)) {
     const unit = dialog.locator('.rule-unit').filter({ hasText: `${stats.health} HP` }).filter({ hasText: stats.name })
@@ -572,7 +639,7 @@ test('the rules show all unit stats, weapons, support, and deterministic health 
   await expect(dialog).toContainText('There are no random rolls.')
   await expect(dialog).toContainText('There is no check or checkmate.')
   await expect(dialog).not.toContainText(/command points|tactic cards|capture chance|roll below/i)
-  await dialog.getByRole('button', { name: 'Back to the battle', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Back to game', exact: true }).click()
   await expect(dialog).toHaveCount(0)
 })
 
@@ -583,7 +650,7 @@ test('hint, sound, and theme preferences persist without changing legal actions'
   await expect(board(page).locator('.move-dot')).not.toHaveCount(0)
   await expect(square(page, 'a4').locator('.damage-preview')).toBeVisible()
   await page.getByRole('button', { name: 'Preferences', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'Make the board yours.' })
+  const dialog = page.getByRole('dialog', { name: 'Settings' })
   await dialog.getByLabel('Move and damage hints', { exact: true }).uncheck()
   await expect(dialog.getByLabel('Attack sounds', { exact: true })).not.toBeChecked()
   for (const theme of ['sage', 'walnut', 'slate']) {
@@ -614,11 +681,11 @@ test('a new local battle resets health and keeps the old battle in the archive',
   const hit = await act(page, 'a1', 'a4')
   const old = await savedBattle(page)
   await page.getByRole('button', { name: 'New game', exact: true }).click()
-  const dialog = page.getByRole('dialog', { name: 'A new kind of chess.' })
+  const dialog = page.getByRole('dialog', { name: 'New game' })
   await expect(dialog.getByRole('button', { name: 'Local friend', exact: true })).toHaveAttribute('aria-pressed', 'true')
   await dialog.getByRole('button', { name: 'Local friend', exact: true }).click()
   await dialog.getByLabel('Play as', { exact: true }).selectOption('b')
-  await dialog.getByRole('button', { name: 'Start battle', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Start game', exact: true }).click()
   await expect(dialog).toHaveCount(0)
   await expectPosition(page, createBattle())
   await expect(log(page)).toHaveCount(0)
@@ -629,14 +696,14 @@ test('a new local battle resets health and keeps the old battle in the archive',
   await page.reload()
   await expectPosition(page, createBattle())
   await page.getByRole('button', { name: 'My games', exact: true }).click()
-  const archive = page.getByRole('dialog', { name: 'Your recent battles.' })
+  const archive = page.getByRole('dialog', { name: 'Recent games' })
   await expect(archive.locator('.target-row')).toHaveCount(1)
   await expect(archive).toContainText('1 actions')
   await archive.locator('.target-row').click()
   await expect(turn(page)).toContainText('Review')
   await expectPosition(page, hit)
   expect((await savedBattle(page)).session).toEqual(old.session)
-  await page.getByRole('button', { name: 'Return to the live battle', exact: true }).click()
+  await page.getByRole('button', { name: 'Return to game', exact: true }).click()
   await expect(turn(page)).toHaveText('Black to act.')
 })
 
@@ -644,11 +711,11 @@ test('resignation requires confirmation and a replacement archives the result', 
   await act(page, 'e2', 'e4')
   const before = await savedBattle(page)
   await page.getByRole('button', { name: 'Resign', exact: true }).click()
-  let dialog = page.getByRole('dialog', { name: 'End this battle?' })
+  let dialog = page.getByRole('dialog', { name: 'Resign?' })
   await dialog.getByRole('button', { name: 'Keep playing', exact: true }).click()
   expect(await savedBattle(page)).toEqual(before)
   await page.getByRole('button', { name: 'Resign', exact: true }).click()
-  dialog = page.getByRole('dialog', { name: 'End this battle?' })
+  dialog = page.getByRole('dialog', { name: 'Resign?' })
   await dialog.getByRole('button', { name: 'Resign', exact: true }).click()
   await expect(turn(page)).toHaveText('White wins.')
   await expect(page.locator('.result-banner')).toContainText('Black resigned.')
@@ -657,7 +724,7 @@ test('resignation requires confirmation and a replacement archives the result', 
   await page.reload()
   await expect(turn(page)).toHaveText('White wins.')
   await page.getByRole('button', { name: 'Play again', exact: true }).click()
-  await page.getByRole('dialog').getByRole('button', { name: 'Start battle', exact: true }).click()
+  await page.getByRole('dialog').getByRole('button', { name: 'Start game', exact: true }).click()
   await expectPosition(page, createBattle())
   await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key) || '[]'), ARCHIVE_KEY)).toEqual([resigned.session])
 })
@@ -726,7 +793,7 @@ for (const width of [360, 390]) {
     await seedBattle(page, pawn)
     await square(page, 'a7').click()
     await square(page, 'a8').click()
-    const promotion = page.getByRole('dialog', { name: 'Choose your new piece.' })
+    const promotion = page.getByRole('dialog', { name: 'Promotion' })
     await expectNoOverflow(page, promotion)
     await promotion.getByRole('button', { name: 'Promote to queen', exact: true }).click()
     await settled(page)
