@@ -1943,6 +1943,83 @@ select option {
   line-height: 1.8;
 }
 
+.new-game-modal {
+  max-width: 520px;
+}
+
+.new-game-content {
+  display: grid;
+  gap: 20px;
+  margin-top: 12px;
+}
+
+.new-game-content > p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.new-game-content .mode-tabs,
+.new-game-content .difficulty-field {
+  margin-top: 0;
+}
+
+.new-game-content .mode-tabs button {
+  min-height: 44px;
+  font-size: 12px;
+}
+
+.new-game-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.new-game-content .difficulty-field {
+  gap: 8px;
+  font-size: 12px;
+}
+
+.new-game-select {
+  position: relative;
+  display: block;
+}
+
+.new-game-content .difficulty-field select,
+.new-game-content .difficulty-field input {
+  height: 44px;
+  font-size: 13px;
+}
+
+.new-game-select select {
+  display: block;
+  padding-right: 38px;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.new-game-select > svg {
+  position: absolute;
+  top: 50%;
+  right: 12px;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.new-game-content .primary-button,
+.new-game-content .secondary-button {
+  width: 100%;
+  min-height: 44px;
+  font-size: 13px;
+}
+
+.new-game-join {
+  display: grid;
+  gap: 12px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}
+
 .rule-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2797,6 +2874,15 @@ strong.invite-code {
 
   .battle-modal h2 {
     font-size: 24px;
+  }
+
+  .new-game-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .new-game-content .difficulty-field select,
+  .new-game-content .difficulty-field input {
+    font-size: 16px;
   }
 
   .modal-close {

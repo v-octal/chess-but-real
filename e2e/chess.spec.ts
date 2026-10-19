@@ -593,6 +593,80 @@ test('the computer worker returns one legal action without fallback or cards @pa
   await expect(log(page)).toHaveCount(0)
 })
 
+test('the new game dialog has consistent controls and separate actions', async ({ page }) => {
+  await page.getByRole('button', { name: 'Play a friend', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: 'New game', exact: true })
+  for (const [width, height] of [[1440, 1000], [520, 700], [390, 844], [320, 568], [844, 390]]) {
+    await page.setViewportSize({ width, height })
+    for (const mode of ['Computer', 'Local friend', 'Online friend']) {
+      const tab = dialog.getByRole('button', { name: mode, exact: true })
+      await tab.click()
+      await expect(tab).toHaveAttribute('aria-pressed', 'true')
+      await expect(dialog.getByRole('combobox')).toHaveCount(mode === 'Computer' ? 2 : 1)
+      const controls = dialog.locator('.new-game-content select, .new-game-content input, .new-game-content button')
+      for (const control of await controls.all()) {
+        const bounds = await control.boundingBox()
+        expect(bounds!.height).toBeGreaterThanOrEqual(44)
+      }
+      const fields = await dialog.locator('.new-game-fields').boundingBox()
+      const primary = await dialog.getByRole('button', { name: mode === 'Online friend' ? 'Create invite link' : 'Start game', exact: true }).boundingBox()
+      expect(primary!.y - fields!.y - fields!.height).toBeGreaterThanOrEqual(16)
+      expect(Math.abs(primary!.x - fields!.x)).toBeLessThan(1)
+      expect(Math.abs(primary!.width - fields!.width)).toBeLessThan(1)
+      if (mode === 'Online friend') {
+        const input = await dialog.getByRole('textbox', { name: 'Friend code or link', exact: true }).boundingBox()
+        const join = dialog.getByRole('button', { name: 'Join game', exact: true })
+        const joinBounds = await join.boundingBox()
+        expect(input!.y - primary!.y - primary!.height).toBeGreaterThanOrEqual(40)
+        expect(joinBounds!.y - input!.y - input!.height).toBeGreaterThanOrEqual(12)
+        expect(Math.abs(joinBounds!.width - input!.width)).toBeLessThan(1)
+        await join.scrollIntoViewIfNeeded()
+        await expect(join).toBeInViewport()
+      }
+      await expectNoOverflow(page, dialog)
+      expect(await dialog.evaluate(element => element.scrollWidth - element.clientWidth)).toBeLessThanOrEqual(1)
+    }
+  }
+})
+
+test('the new game dialog preserves selections and keyboard access', async ({ page, browserName }) => {
+  const tabKey = browserName === 'webkit' && process.platform === 'darwin' ? 'Alt+Tab' : 'Tab'
+  const opener = page.getByRole('button', { name: 'New game', exact: true })
+  await opener.focus()
+  await page.keyboard.press('Enter')
+  const dialog = page.getByRole('dialog', { name: 'New game', exact: true })
+  await dialog.getByRole('button', { name: 'Computer', exact: true }).click()
+  await dialog.getByRole('combobox', { name: 'Difficulty', exact: true }).selectOption('1')
+  const color = dialog.getByRole('combobox', { name: 'Play as', exact: true })
+  await color.selectOption('b')
+  await dialog.getByRole('button', { name: 'Online friend', exact: true }).click()
+  await expect(color).toHaveValue('b')
+  await color.focus()
+  await page.keyboard.press(tabKey)
+  await expect(dialog.getByRole('button', { name: 'Create invite link', exact: true })).toBeFocused()
+  await page.keyboard.press(tabKey)
+  await expect(dialog.getByRole('textbox', { name: 'Friend code or link', exact: true })).toBeFocused()
+  await page.keyboard.press(tabKey)
+  await expect(dialog.getByRole('button', { name: 'Join game', exact: true })).toBeFocused()
+  await page.keyboard.press(tabKey)
+  await expect(dialog.getByRole('button', { name: 'Close dialog', exact: true })).toBeFocused()
+  await page.keyboard.press(`Shift+${tabKey}`)
+  await expect(dialog.getByRole('button', { name: 'Join game', exact: true })).toBeFocused()
+  await dialog.getByRole('button', { name: 'Computer', exact: true }).click()
+  await expect(dialog.getByRole('combobox', { name: 'Difficulty', exact: true })).toHaveValue('1')
+  await expect(color).toHaveValue('b')
+  await color.selectOption('w')
+  await dialog.getByRole('button', { name: 'Start game', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect.poll(() => savedBattle(page)).toMatchObject({ mode: 'computer', playerColor: 'w', level: 1 })
+  await opener.focus()
+  await page.keyboard.press('Enter')
+  await expect(dialog).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(opener).toBeFocused()
+})
+
 test('dialogs trap focus and Escape restores the opener', async ({ page }) => {
   const cases = [
     { opener: page.getByRole('button', { name: 'Preferences', exact: true }), title: 'Settings' },

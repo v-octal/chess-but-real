@@ -35,6 +35,15 @@ export default defineConfig({
       use: { viewport: { width: 1440, height: 1000 } },
     },
     {
+      name: 'webkit-dialogs',
+      grep: /new game dialog/,
+      use: {
+        browserName: 'webkit',
+        viewport: { width: 1440, height: 1000 },
+        launchOptions: { args: [] },
+      },
+    },
+    {
       name: 'mobile',
       use: {
         viewport: { width: 390, height: 844 },
